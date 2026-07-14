@@ -1,0 +1,109 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100svh;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  gap: 12px;
+}
+
+.title {
+  font-size: 20px;
+  margin: 0;
+}
+
+.status {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status--connected {
+  color: #2e8b57;
+}
+
+.status--connecting {
+  color: var(--muted);
+}
+
+.status--disconnected,
+.status--error {
+  color: #c1443b;
+}
+
+.log {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-empty {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.log-entry {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 15px;
+  word-break: break-word;
+}
+
+.log-label {
+  flex: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  min-width: 3.5em;
+}
+
+.log-entry--sent .log-label {
+  color: #2e6fc1;
+}
+
+.log-entry--received .log-label {
+  color: #2e8b57;
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+}
+
+.composer-input {
+  flex: 1;
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.composer-send {
+  min-height: 44px;
+  min-width: 72px;
+  padding: 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  background: #2e6fc1;
+  color: #fff;
+}
+
+.composer-send:disabled,
+.composer-input:disabled {
+  opacity: 0.5;
+}
