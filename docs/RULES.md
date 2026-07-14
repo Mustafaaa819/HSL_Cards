@@ -48,4 +48,20 @@ Power cards can be played on top of ANY card, regardless of rank, ignoring the h
 ## Player count
 - 2–5 players per single deck.
 - 6+ players: two decks shuffled together.
+- Max 11 players (two decks = 104 cards; 12 players × 9 cards = 108 doesn't fit).
 - Confirmed: 1v1 vs AI is a stated long-term goal but is OUT OF SCOPE for the friend-group prototype build.
+
+## Engine implementation decisions (locked in Phase 1)
+
+These weren't explicitly stated in earlier rules discussion but were required to make the engine unambiguous. Treat these as final rules, not implementation trivia:
+
+- **Rank order: 2 (low) < 3 < 4 < 5 < 6 < 7 < 8 < 9 < 10 < J < Q < K < A (high).** Ace is the highest non-power card, only beatable by a power card.
+- **The 7 constraint REPLACES the beat-the-top rule for the very next player only** — it does not stack with it. A 3 is legal on top of a 7 even though 3 is lower than 7, because the active rule at that moment is "≤7," not "beat the top card."
+- **Power cards keep their natural rank once they're sitting on the discard pile.** A J played as a power must then be beaten by Q, K, A, or another power card — its "beat me" value reverts to normal once it's no longer the card being played.
+- **The 10 fully leaves the game when it nukes the pile** — it does not remain as the new top card of an empty pile. After a nuke, the next player can play anything at all.
+- **A failed blind-flip reveal joins the player's new picked-up hand.** It cannot return face-down, since it's already been seen by the table.
+- **All pickups — from the deck phase, hand phase, or a failed blind flip — land in the player's private hand (Layer 3), even if the player was actively playing from their face-up Layer 2 at the time.** The player clears that hand before resuming whatever face-up cards they had left.
+- **Layer transitions (hand → face-up → blind) cannot happen during the deck phase.** The turn-start draw keeps refilling the hand, so face-up and blind stay locked until the shared deck is empty.
+- **Exactly one card is played per turn.** No playing multiple cards of the same rank together in a single move, even though this exists as an option in some games in this genre. This may be revisited as a future variant, not in v1.
+- **First player is seat 0, in join order.** Arbitrary and easily changed later (e.g. randomized, or loser-of-last-game starts).
+- **Voluntary pickup requires a non-empty pile.** It cannot be used as a pass/skip action.
