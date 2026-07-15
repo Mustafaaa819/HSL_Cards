@@ -1,2 +1,11 @@
 -r requirements.txt
 pytest==9.1.1
+httpx==0.28.1
+
+# Browser E2E (backend/dev/e2e_phase4.py). The 37MB wheel times out and
+# arrives corrupted from files.pythonhosted.org on this connection; install
+# it from a mirror instead:
+#   pip install -i https://mirrors.aliyun.com/pypi/simple/ -r requirements-dev.txt
+# The script drives the locally installed Chrome (channel="chrome"), so
+# `playwright install` (~150MB of Chromium) is deliberately NOT required.
+playwright==1.61.0

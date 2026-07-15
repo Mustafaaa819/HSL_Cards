@@ -1,24 +1,25 @@
+/* Design tokens from CLAUDE.md's design system. Dark table, always. */
 :root {
-  --text: #1c1c1c;
-  --bg: #ffffff;
-  --border: #d8d8d8;
-  --muted: #6b6b6b;
+  --bg: #14181a;
+  --surface: #1c2225;
+  --surface-raised: #232b2e;
+  --border: #2e383b;
+  --text: #ede7dc;
+  --muted: #8b968f;
+  --gold: #c9a15a; /* reserved for power cards + turn emphasis */
+  --danger: #c1443b;
+  --safe: #3e8e82;
+  --card-face: #f3eee3;
+  --card-red: #b3352c;
+  --card-black: #22262a;
+  --card-back: #1f3230;
 
   font: 16px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
-  color-scheme: light dark;
+  color-scheme: dark;
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #f3f4f6;
-    --bg: #16171d;
-    --border: #33343d;
-    --muted: #9ca3af;
-  }
 }
 
 * {
@@ -27,8 +28,15 @@
 
 body {
   margin: 0;
+  background: var(--bg);
 }
 
 #root {
   min-height: 100svh;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }

@@ -1,81 +1,80 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import './App.css'
+import { api } from './api.js'
+import { clearSession, loadSession, saveSession } from './session.js'
+import EntryScreen from './screens/EntryScreen.jsx'
+import LobbyScreen from './screens/LobbyScreen.jsx'
+import GameScreen from './screens/GameScreen.jsx'
 
-// In dev, the frontend (Vite, :5173) and backend (uvicorn, :8000) run as
-// separate servers, so the WS URL must be set explicitly via .env.local.
-// In production the frontend is served by the same FastAPI process as the
-// backend, so we can derive the WS URL from the current page's origin.
-function resolveWsUrl() {
-  const envUrl = import.meta.env.VITE_WS_URL
-  if (envUrl) return envUrl
-
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/ws/test`
-}
-
+// stages: resolving (stored session, checking where it belongs) | entry | lobby | game
 export default function App() {
-  const [status, setStatus] = useState('connecting')
-  const [draft, setDraft] = useState('')
-  const [log, setLog] = useState([])
-  const socketRef = useRef(null)
+  const [session, setSession] = useState(loadSession)
+  const [stage, setStage] = useState(session ? 'resolving' : 'entry')
+  const [notice, setNotice] = useState(null)
 
+  // A reload mid-session (common on phones) lands here with a stored token:
+  // ask the server whether that room is still in the lobby or already live.
   useEffect(() => {
-    const socket = new WebSocket(resolveWsUrl())
-    socketRef.current = socket
-
-    socket.onopen = () => setStatus('connected')
-    socket.onclose = () => setStatus('disconnected')
-    socket.onerror = () => setStatus('error')
-    socket.onmessage = (event) => {
-      setLog((prev) => [...prev, { direction: 'received', text: event.data }])
+    if (stage !== 'resolving') return
+    let cancelled = false
+    api
+      .getRoom(session.roomCode, session.token)
+      .then((room) => {
+        if (!cancelled) setStage(room.status === 'in_progress' ? 'game' : 'lobby')
+      })
+      .catch(() => {
+        if (cancelled) return
+        clearSession()
+        setSession(null)
+        setStage('entry')
+      })
+    return () => {
+      cancelled = true
     }
+  }, [stage, session])
 
-    return () => socket.close()
-  }, [])
-
-  function sendMessage() {
-    const socket = socketRef.current
-    if (!socket || socket.readyState !== WebSocket.OPEN || draft.trim() === '') return
-
-    socket.send(draft)
-    setLog((prev) => [...prev, { direction: 'sent', text: draft }])
-    setDraft('')
+  function enterRoom(result) {
+    const next = {
+      roomCode: result.room_code,
+      playerId: result.player_id,
+      token: result.token,
+    }
+    saveSession(next)
+    setSession(next)
+    setNotice(null)
+    setStage('lobby')
   }
 
-  return (
-    <main className="page">
-      <h1 className="title">WebSocket Echo Test</h1>
-      <p className={`status status--${status}`}>{status}</p>
+  function leaveToEntry(message) {
+    clearSession()
+    setSession(null)
+    setNotice(message ?? null)
+    setStage('entry')
+  }
 
-      <div className="log" aria-live="polite">
-        {log.length === 0 && <p className="log-empty">No messages yet.</p>}
-        {log.map((entry, i) => (
-          <div key={i} className={`log-entry log-entry--${entry.direction}`}>
-            <span className="log-label">{entry.direction === 'sent' ? 'sent' : 'echoed'}</span>
-            <span className="log-text">{entry.text}</span>
-          </div>
-        ))}
-      </div>
+  // Terminal socket closes, per docs/WS_PROTOCOL.md: 4002 means the room
+  // exists but isn't started (send them back to the lobby); the rest mean
+  // this session can never connect, so it gets discarded.
+  function handleFatalClose(code) {
+    if (code === 4002) {
+      setStage('lobby')
+    } else {
+      leaveToEntry('Lost access to the game — join or create a new room.')
+    }
+  }
 
-      <form
-        className="composer"
-        onSubmit={(e) => {
-          e.preventDefault()
-          sendMessage()
-        }}
-      >
-        <input
-          className="composer-input"
-          type="text"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="Type a message"
-          disabled={status !== 'connected'}
-        />
-        <button className="composer-send" type="submit" disabled={status !== 'connected'}>
-          Send
-        </button>
-      </form>
-    </main>
-  )
+  if (stage === 'resolving') {
+    return (
+      <main className="screen">
+        <p className="loading">Loading…</p>
+      </main>
+    )
+  }
+  if (stage === 'lobby') {
+    return <LobbyScreen session={session} onStarted={() => setStage('game')} onLeft={leaveToEntry} />
+  }
+  if (stage === 'game') {
+    return <GameScreen session={session} onLeave={() => leaveToEntry(null)} onFatalClose={handleFatalClose} />
+  }
+  return <EntryScreen onEnterRoom={enterRoom} notice={notice} />
 }

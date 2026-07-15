@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<!--
+  Throwaway manual test client for the Phase 3 game WebSocket.
+  NOT part of the app: nothing serves or imports this file. Open it
+  directly in a browser (file://) while the backend runs locally.
+
+  Flow: create/join a room + start it via the REST endpoints (curl or
+  the /docs Swagger UI), paste the room code + your player token here,
+  connect, then drive the game with the action buttons.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HSL Cards — WS test client</title>
+  <style>
+    body { font-family: monospace; margin: 1rem; background: #14181A; color: #EDE7DC; }
+    input, button { font-family: inherit; margin: 0.15rem; }
+    #log { white-space: pre-wrap; border: 1px solid #3E8E82; padding: 0.5rem; margin-top: 1rem;
+           max-height: 70vh; overflow-y: auto; font-size: 12px; }
+    .err { color: #C1443B; }
+    .evt { color: #C9A15A; }
+  </style>
+</head>
+<body>
+  <h3>HSL Cards — WS test client</h3>
+  <div>
+    <input id="server" value="ws://localhost:8000" size="24">
+    <input id="room" placeholder="room code" size="8">
+    <input id="token" placeholder="player token" size="26">
+    <button onclick="connect()">connect</button>
+  </div>
+  <div>
+    <input id="card" placeholder="card e.g. 7H" size="10">
+    <button onclick="send({action: 'play', card: el('card').value.trim().toUpperCase()})">play</button>
+    <button onclick="send({action: 'pick_up'})">pick up pile</button>
+    <button onclick="send({action: 'flip'})">flip blind</button>
+  </div>
+  <div id="log"></div>
+
+  <script>
+    let ws = null;
+    const el = (id) => document.getElementById(id);
+    const log = (text, cls) => {
+      const line = document.createElement('div');
+      if (cls) line.className = cls;
+      line.textContent = text;
+      el('log').prepend(line);
+    };
+
+    function connect() {
+      if (ws) ws.close();
+      ws = new WebSocket(`${el('server').value}/ws/${el('room').value.trim().toUpperCase()}`);
+      ws.onopen = () => {
+        ws.send(JSON.stringify({token: el('token').value.trim()}));
+        log('-- connected, auth sent --');
+      };
+      ws.onclose = (e) => log(`-- closed: ${e.code} ${e.reason} --`, 'err');
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'error') return log(`ERROR: ${msg.message}`, 'err');
+        if (msg.event) log(`EVENT: ${JSON.stringify(msg.event)}`, 'evt');
+        const s = msg.state;
+        log(`turn=${s.current_player_id} phase=${s.phase} top=${s.top_card} deck=${s.draw_deck_count}`
+          + ` seven=${s.seven_pending} over=${s.game_over} finish=[${s.finish_order}]\n`
+          + `  you: hand=[${s.you.hand}] faceup=[${s.you.face_up}] blind=${s.you.blind_count}`
+          + ` layer=${s.you.active_layer}\n`
+          + s.players.map(p => `  ${p.name}: hand#${p.hand_count} faceup=[${p.face_up}] blind#${p.blind_count}`).join('\n'));
+      };
+    }
+
+    function send(action) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return log('not connected', 'err');
+      ws.send(JSON.stringify(action));
+      log(`>> ${JSON.stringify(action)}`);
+    }
+  </script>
+</body>
+</html>
