@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from app.engine import Card
 from app.rooms import Room
+from app.sync.clock import turn_clock
 
 
 def _cards(cards: list[Card]) -> list[str]:
@@ -62,6 +63,10 @@ def filtered_state(room: Room, viewer_id: str) -> dict:
         "discard_pile": _cards(game.discard_pile),
         "top_card": str(game.top_card) if game.top_card else None,
         "game_over": game.game_over,
+        # Seconds until the AFK clock forces the current player's move, taken
+        # at send time so a reconnecting client resumes mid-countdown instead
+        # of restarting at the full timeout. None = no timer running.
+        "turn_ends_in": turn_clock.remaining(room.code),
         "finish_order": list(game.finish_order),
         "players": players,
         "you": {

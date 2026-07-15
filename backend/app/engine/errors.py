@@ -14,7 +14,18 @@ class InvalidSetupError(EngineError):
 
 
 class OutOfTurnError(EngineError):
-    """Raised when a player acts outside of their turn."""
+    """Raised when a player acts outside of their turn.
+
+    Carries the two ids structurally rather than only baked into the
+    message: the engine deals in player ids and has no idea what anyone is
+    called, so the server layer needs the raw ids to render a message with
+    display names in it. The str() form stays id-based for logs and tests.
+    """
+
+    def __init__(self, current_player_id: str, actor_id: str):
+        self.current_player_id = current_player_id
+        self.actor_id = actor_id
+        super().__init__(f"It is {current_player_id}'s turn, not {actor_id}'s")
 
 
 class IllegalMoveError(EngineError):

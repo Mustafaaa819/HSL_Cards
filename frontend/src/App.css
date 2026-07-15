@@ -292,6 +292,20 @@
   opacity: 0.45;
 }
 
+/* The card the server just refused. Declared after .card--power so a
+   rejected power card reads as rejected, not golden. Lives only as long as
+   the error toast (~4s, cleared sooner if the table moves). */
+.card--rejected {
+  border: 2px solid var(--danger);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 60%, transparent);
+  animation: card-rejected 0.3s ease-in-out 2;
+}
+
+@keyframes card-rejected {
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+
 .card-rank {
   font-weight: 800;
   line-height: 1;
@@ -464,6 +478,41 @@
   }
 }
 
+/* AFK countdown chip inside the turn banner. Tabular digits so the number
+   ticking down doesn't make the banner width jitter. */
+.turn-countdown {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.3);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+
+/* Someone else's turn has stalled past the warning threshold — tell the
+   table who it's waiting on, so the coming forced move doesn't look like
+   a glitch. */
+.turn-banner--waiting {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--text);
+}
+
+.turn-banner--waiting .turn-countdown {
+  color: var(--danger);
+  font-weight: 800;
+}
+
+/* Your own clock is nearly out. Declared after --you so it recolors the
+   gold banner without killing its pulse. */
+.turn-banner--urgent {
+  background: color-mix(in srgb, var(--danger) 24%, var(--bg));
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: none;
+}
+
 .seven-warning {
   margin: 0;
   text-align: center;
@@ -592,11 +641,32 @@
   max-width: min(92vw, 440px);
   padding: 10px 16px;
   border-radius: 10px;
+  border: 1px solid transparent;
   background: var(--danger);
   color: #fff;
   font-size: 14px;
   font-weight: 600;
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+}
+
+/* Per-code variants (docs/WS_PROTOCOL.md error codes). illegal_move and
+   protocol keep the danger base: both mean "the server said no". The two
+   below mean something different to the player, so they must not look like
+   a rules violation. */
+
+/* Not a bad card — a bad moment. Gold ties it to the turn indicators. */
+.toast--out_of_turn {
+  background: var(--surface-raised);
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+/* Client-only: the socket is down and the tap never reached the server.
+   Muted, because it's the connection's fault, not the player's. */
+.toast--offline {
+  background: var(--surface-raised);
+  border-color: var(--border);
+  color: var(--muted);
 }
 
 .overlay {

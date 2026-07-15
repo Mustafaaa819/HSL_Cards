@@ -232,6 +232,24 @@ class Game:
             self._end_turn(None)
         return result
 
+    def skip_turn(self, player_id: str) -> None:
+        """Pass the turn without acting — SYSTEM ONLY, never a player choice.
+
+        This exists solely as the AFK timer's last resort: on an empty pile
+        there is nothing to pick up, so there is no no-choice action left to
+        force, and the server will not pick a card to play on someone's
+        behalf. It is not exposed as a client action and must not be — a skip
+        is a mild self-penalty (the skipper keeps their cards while everyone
+        else sheds theirs), so it would never be a move worth offering.
+
+        The empty-pile guard keeps that contract enforceable in the engine
+        rather than resting on the server layer's discretion.
+        """
+        self._require_turn(player_id)
+        if self.discard_pile:
+            raise IllegalMoveError("A turn can only be skipped when the pile is empty")
+        self._end_turn(None)
+
     # --------------------------------------------------------------- internal
 
     def _get_player(self, player_id: str) -> Player:
@@ -245,7 +263,7 @@ class Game:
             raise IllegalMoveError("The game is over")
         player = self._get_player(player_id)
         if player is not self.current_player:
-            raise OutOfTurnError(f"It is {self.current_player.player_id}'s turn, not {player_id}'s")
+            raise OutOfTurnError(self.current_player.player_id, player_id)
         return player
 
     def _apply_card_effects(self, card: Card) -> tuple[bool, bool]:

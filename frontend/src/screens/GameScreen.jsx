@@ -3,22 +3,38 @@ import Card from '../components/Card.jsx'
 import { useGameSocket } from '../hooks/useGameSocket.js'
 import { parseCard, prettyCard, sortHand } from '../cards.js'
 
+// Once a turn has been stalled this long, everyone gets told who the table
+// is waiting on — otherwise the eventual forced pickup/flip/skip looks like
+// a glitch to the other players.
+const STALL_WARNING_SECONDS = 30
+const URGENT_SECONDS = 10
+
 export default function GameScreen({ session, onLeave, onFatalClose }) {
-  const [toast, setToast] = useState(null)
+  // { message, code, card } — see docs/WS_PROTOCOL.md.
+  const [error, setError] = useState(null)
   const [lastEvent, setLastEvent] = useState(null)
   const toastTimer = useRef(null)
 
   const { gameState, status, sendAction, reclaim } = useGameSocket(session.roomCode, session.token, {
-    onServerError: (message) => {
+    onServerError: (payload) => {
       clearTimeout(toastTimer.current)
-      setToast(message)
-      toastTimer.current = setTimeout(() => setToast(null), 4000)
+      setError(payload)
+      toastTimer.current = setTimeout(() => setError(null), 4000)
     },
-    onEvent: (event) => setLastEvent(event),
+    onEvent: (event) => {
+      setLastEvent(event)
+      // The table moved, so any complaint about the old state is stale —
+      // drop it rather than leave a card marked against a pile it no
+      // longer refers to.
+      clearTimeout(toastTimer.current)
+      setError(null)
+    },
     onFatalClose,
   })
 
   useEffect(() => () => clearTimeout(toastTimer.current), [])
+
+  const secondsLeft = useTurnCountdown(gameState)
 
   if (!gameState) {
     return (
@@ -33,6 +49,10 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   const myTurn = gameState.current_player_id === you.player_id
   const currentName = nameById[gameState.current_player_id]
   const opponents = gameState.players.filter((p) => p.player_id !== you.player_id)
+
+  // Only an illegal_move names a card. A duplicate rank+suit (two-deck
+  // games) marks both copies — they're the same card, both equally refused.
+  const rejectedCard = error?.code === 'illegal_move' ? error.card : null
 
   // Never block a tap on legality — the server is the only judge. We only
   // dim things that are obviously not actionable right now.
@@ -70,7 +90,19 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
       {gameState.game_over ? (
         <TurnBanner className="turn-banner--over" text="Game over" />
       ) : myTurn ? (
-        <TurnBanner className="turn-banner--you" text="Your turn" />
+        <TurnBanner
+          className={
+            'turn-banner--you' +
+            (secondsLeft != null && secondsLeft <= URGENT_SECONDS ? ' turn-banner--urgent' : '')
+          }
+          text="Your turn"
+        >
+          {secondsLeft != null && <span className="turn-countdown">{secondsLeft}s</span>}
+        </TurnBanner>
+      ) : secondsLeft != null && secondsLeft <= STALL_WARNING_SECONDS ? (
+        <TurnBanner className="turn-banner--waiting" text={`Waiting on ${currentName ?? '…'}`}>
+          <span className="turn-countdown">{secondsLeft}s</span>
+        </TurnBanner>
       ) : (
         <TurnBanner text={`${currentName ?? '…'}'s turn`} />
       )}
@@ -127,6 +159,7 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 spec={spec}
                 size="sm"
                 dimmed={you.active_layer !== 'face_up' || !myTurn}
+                rejected={spec === rejectedCard}
                 onClick={() => playCard(spec)}
               />
             ))}
@@ -153,6 +186,7 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 spec={spec}
                 size="md"
                 dimmed={you.active_layer !== 'hand' || !myTurn}
+                rejected={spec === rejectedCard}
                 onClick={() => playCard(spec)}
               />
             ))}
@@ -161,8 +195,8 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         </div>
       </section>
 
-      {toast && (
-        <div className="toast" role="alert">{toast}</div>
+      {error && (
+        <div className={`toast toast--${error.code}`} role="alert">{error.message}</div>
       )}
 
       {gameState.game_over && (
@@ -177,8 +211,37 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   )
 }
 
-function TurnBanner({ className = '', text }) {
-  return <div className={`turn-banner ${className}`}>{text}</div>
+function TurnBanner({ className = '', text, children }) {
+  return (
+    <div className={`turn-banner ${className}`}>
+      {text}
+      {children}
+    </div>
+  )
+}
+
+// Mirrors the server's AFK clock locally. Every state frame carries
+// turn_ends_in measured at send time (docs/WS_PROTOCOL.md), so this never
+// free-runs from a guess: a reconnect snapshot mid-turn resumes at the
+// server's real remaining time instead of restarting at 60.
+function useTurnCountdown(gameState) {
+  const [secondsLeft, setSecondsLeft] = useState(null)
+
+  useEffect(() => {
+    if (!gameState || gameState.game_over || gameState.turn_ends_in == null) {
+      setSecondsLeft(null)
+      return
+    }
+    const deadline = Date.now() + gameState.turn_ends_in * 1000
+    const tick = () => setSecondsLeft(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)))
+    tick()
+    // 500ms, not 1s: a 1s interval visibly skips numbers when it beats
+    // against the deadline fraction.
+    const timer = setInterval(tick, 500)
+    return () => clearInterval(timer)
+  }, [gameState])
+
+  return secondsLeft
 }
 
 function ConnectionBanner({ status, onReclaim }) {
@@ -299,10 +362,16 @@ function describeEvent(event, nameById) {
     return text
   }
   if (event.kind === 'pickup') {
-    return `${name} picked up the pile (${event.count} cards)`
+    const how = event.forced ? 'timed out — picked up the pile' : 'picked up the pile'
+    return `${name} ${how} (${event.count} ${event.count === 1 ? 'card' : 'cards'})`
+  }
+  if (event.kind === 'skip') {
+    return `${name} timed out — turn skipped`
   }
   if (event.kind === 'flip') {
-    let text = `${name} flipped ${prettyCard(event.card)}`
+    let text = event.forced
+      ? `${name} timed out — flipped ${prettyCard(event.card)}`
+      : `${name} flipped ${prettyCard(event.card)}`
     if (event.played) {
       text += ' — it plays!'
       if (event.pile_burned) text += ' Pile burned!'

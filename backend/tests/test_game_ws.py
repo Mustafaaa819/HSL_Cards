@@ -233,7 +233,7 @@ def test_full_match_over_websockets_reaches_a_finishing_order():
         # P1's 9D can't beat KH — forced pickup; the pile lands in their HAND
         # (Layer 3) even though they were on face-up cards, per RULES.md.
         event, state = step(ws1, {"action": "pick_up"})
-        assert event == {"kind": "pickup", "player_id": p1, "count": 3}
+        assert event == {"kind": "pickup", "player_id": p1, "count": 3, "forced": False}
         assert state["you"]["hand"] == ["3H", "5C", "KH"]
         assert state["you"]["face_up"] == ["9D"]
         assert state["top_card"] is None

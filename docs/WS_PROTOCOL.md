@@ -1,4 +1,4 @@
-# Game WebSocket protocol (Phase 3)
+# Game WebSocket protocol (Phase 3, + Phase 5 AFK/errors)
 
 Endpoint: `ws(s)://<host>/ws/{room_code}` — live game sync only. The lobby
 (create/join/ready/start) stays on the REST endpoints; connect the socket
@@ -23,8 +23,7 @@ once the room has started.
 
 **Reconnect:** connecting again with the same token replaces the old socket
 (closed with 4008) and the new socket immediately receives the current
-filtered snapshot. Other players see nothing. No AFK/timeout logic exists
-yet (Phase 5).
+filtered snapshot. Other players see nothing.
 
 ## Client → server actions
 
@@ -37,9 +36,60 @@ for the current player automatically at turn start during the deck phase.
 - `{"action": "flip"}` — blind flip. Optional `"index": <int>` picks which
   face-down card (cosmetic — they're unknown by definition; defaults to 0).
 
+That is the complete list. Notably there is **no "skip" action** — the
+server can pass an AFK player's turn (see below), but a skip is never
+offered to a client and `{"action": "skip"}` is rejected like any other
+unknown action.
+
 The server re-validates everything against the engine. An illegal,
-out-of-turn, or malformed action gets `{"type": "error", "message": "..."}`
-back **to the sender only**; nothing is mutated or broadcast.
+out-of-turn, or malformed action is rejected **to the sender only**;
+nothing is mutated or broadcast.
+
+## Errors
+
+```jsonc
+{
+  "type": "error",
+  "message": "5H doesn't beat 9D",  // human-readable, safe to show as-is
+  "code": "illegal_move",           // stable machine-readable tag
+  "card": "5H"                      // the rejected card, or null
+}
+```
+
+`message` is always specific enough to surface directly — the engine's own
+wording is passed through rather than flattened to "Illegal move".
+
+| `code` | Meaning |
+|---|---|
+| `illegal_move` | The engine refused it (didn't beat the top card, wrong layer, pile empty, game over, …) |
+| `out_of_turn` | Not your turn. Rephrased server-side with display names, since the engine only knows player ids |
+| `protocol` | Structurally bad frame: not JSON, unknown action, unparseable card, non-integer index |
+
+`card` is the card string from a rejected `play`, echoed back so the client
+can highlight **that exact card** instead of guessing which tap the error
+belongs to. It is `null` for every other error, including `out_of_turn`.
+
+## AFK / turn timeout
+
+Each turn is allowed **60 seconds**. The clock is armed when the first
+socket connects and re-armed on every legal action; it is driven by the
+room, not by a socket, so a player who closed their tab still times out.
+Illegal moves do not reset it.
+
+On expiry the server acts for the current player and broadcasts the result
+like any other move. It never plays a card on their behalf — only
+no-choice outcomes are forced, in order:
+
+1. **On blind cards** → flip the next unflipped blind card. A flip carries
+   no decision anyway, so this is exactly the move they would have made.
+2. **Pile has cards** → pick up the pile. The normal penalty for not acting.
+3. **Empty pile** → skip the turn (`{"kind": "skip", …}`). With nothing to
+   pick up there is no forceable move left. The skipper keeps their whole
+   hand while everyone else sheds cards, so this is a self-penalty, not an
+   exploit.
+
+The clock is cancelled at game over and when the last socket in a room
+disconnects (an abandoned room must not keep forcing moves at itself).
 
 ## Server → client messages
 
@@ -52,9 +102,15 @@ filtered view**, never identical payloads.
 `event` describes what just happened publicly:
 
 - `{"kind": "play", "player_id", "card", "pile_burned", "direction_reversed", "player_finished"}`
-- `{"kind": "pickup", "player_id", "count"}`
-- `{"kind": "flip", "player_id", "card", "played", "pile_burned", "direction_reversed", "picked_up", "player_finished"}`
+- `{"kind": "pickup", "player_id", "count", "forced"}`
+- `{"kind": "flip", "player_id", "card", "played", "pile_burned", "direction_reversed", "picked_up", "player_finished", "forced"}`
   — the flip event is the ONLY thing that ever reveals a blind card.
+- `{"kind": "skip", "player_id", "forced"}` — AFK timeout on an empty pile.
+
+`forced` is `true` when the AFK timer produced the move rather than the
+player, so the UI can say "timed out" instead of "picked up". There is no
+`forced` on `play` (a card is never played for anyone) and it is always
+`true` on `skip` (a skip only ever happens on timeout).
 
 `state` (built by `app/sync/serializer.py`, the single visibility authority):
 
@@ -69,6 +125,12 @@ filtered view**, never identical payloads.
   "discard_pile": ["6H", "JD"],      // full pile, bottom → top (public)
   "top_card": "JD" | null,
   "game_over": false,
+  "turn_ends_in": 60.0,              // seconds until the AFK clock forces the current
+                                     // player's move, measured at send time (so a
+                                     // reconnect snapshot resumes mid-countdown).
+                                     // null = no timer (game over / nobody connected).
+                                     // Remaining seconds, NOT a timestamp — immune to
+                                     // client/server clock skew.
   "finish_order": ["…"],             // fills as players finish; full 1st→last at game over
   "players": [                       // everyone, seat order
     { "player_id": "…", "name": "…", "seat": 0,

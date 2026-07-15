@@ -43,7 +43,13 @@ export function useGameSocket(roomCode, token, handlers) {
         setGameState(message.state)
         if (message.event) handlersRef.current?.onEvent?.(message.event, message.state)
       } else if (message.type === 'error') {
-        handlersRef.current?.onServerError?.(message.message)
+        // Whole payload, not just the text: `code` and `card` are what let
+        // the UI highlight the exact card the server refused.
+        handlersRef.current?.onServerError?.({
+          message: message.message,
+          code: message.code ?? 'illegal_move',
+          card: message.card ?? null,
+        })
       }
     }
 
@@ -88,7 +94,13 @@ export function useGameSocket(roomCode, token, handlers) {
   const sendAction = useCallback((action) => {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      handlersRef.current?.onServerError?.('Not connected right now — reconnecting…')
+      // Shaped like a server error so the toast has one payload type to
+      // render. "offline" is client-only — it never comes over the wire.
+      handlersRef.current?.onServerError?.({
+        message: 'Not connected right now — reconnecting…',
+        code: 'offline',
+        card: null,
+      })
       return
     }
     socket.send(JSON.stringify(action))

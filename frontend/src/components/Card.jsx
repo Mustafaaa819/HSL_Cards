@@ -6,12 +6,24 @@ import { parseCard } from '../cards.js'
 //
 // Sizes: xs (opponent face-up minis) / sm (own blind + face-up rows) /
 // md (own hand) / lg (top of the discard pile).
-export default function Card({ spec, hidden = false, size = 'md', dimmed = false, onClick, label }) {
+//
+// `rejected` marks the card the server just refused — the toast says why,
+// this says which.
+export default function Card({
+  spec,
+  hidden = false,
+  size = 'md',
+  dimmed = false,
+  rejected = false,
+  onClick,
+  label,
+}) {
   const interactive = typeof onClick === 'function'
   const Tag = interactive ? 'button' : 'div'
 
   const classes = ['card', `card--${size}`]
   if (dimmed) classes.push('card--dimmed')
+  if (rejected) classes.push('card--rejected')
 
   if (hidden) {
     classes.push('card--back')
