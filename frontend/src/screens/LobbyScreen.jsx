@@ -116,6 +116,14 @@ export default function LobbyScreen({ session, onStarted, onLeft }) {
             </span>
           </li>
         ))}
+        {/* Alone in the room: show where the next player will land, so the
+            single-player lobby reads as "waiting", not "broken". */}
+        {room.players.length === 1 && (
+          <li className="lobby-player lobby-player--empty" aria-hidden="true">
+            <span className="avatar avatar--empty">?</span>
+            <span className="lobby-player-empty-text">Waiting for a friend to join…</span>
+          </li>
+        )}
       </ul>
 
       <div className="lobby-actions">

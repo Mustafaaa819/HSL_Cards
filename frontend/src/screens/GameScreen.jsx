@@ -9,11 +9,81 @@ import { parseCard, prettyCard, sortHand } from '../cards.js'
 const STALL_WARNING_SECONDS = 30
 const URGENT_SECONDS = 10
 
+// Flight/burn/flash durations live in App.css; these only bound how long the
+// transient DOM for each effect sticks around. Generous on purpose — removal
+// a beat late is invisible, removal a beat early truncates the animation.
+const FLIGHT_CLEANUP_MS = 450
+const BURN_CLEANUP_MS = 750
+const FORCED_FLASH_MS = 900
+
+const rectOf = (el) => {
+  if (!el) return null
+  const { x, y, width, height } = el.getBoundingClientRect()
+  return { x, y, w: width, h: height }
+}
+
 export default function GameScreen({ session, onLeave, onFatalClose }) {
   // { message, code, card } — see docs/WS_PROTOCOL.md.
   const [error, setError] = useState(null)
   const [lastEvent, setLastEvent] = useState(null)
   const toastTimer = useRef(null)
+
+  // Transient motion layer: cards mid-flight to the pile, the burn ghost of
+  // a just-nuked pile, and the danger flash on whoever the AFK timer moved
+  // for. All render as fixed-position overlays (pointer-events: none), so
+  // nothing here ever blocks the next tap.
+  const [flights, setFlights] = useState([])
+  const [burn, setBurn] = useState(null)
+  const [forcedFlash, setForcedFlash] = useState(null)
+  const discardRef = useRef(null)
+  const blindRowRef = useRef(null)
+  const youAreaRef = useRef(null)
+  const seatRefs = useRef({})
+  const pendingTapRef = useRef(null) // { spec, rect } of the card just tapped
+  const burnTimer = useRef(null)
+  const flashTimer = useRef(null)
+
+  const runMotion = (event, state) => {
+    const to = rectOf(discardRef.current)
+    if (!to) return
+    const myId = state.you.player_id
+
+    if ((event.kind === 'play' || event.kind === 'flip') && event.pile_burned) {
+      // A nuke gets its own bigger beat instead of the normal flight: the 10
+      // pops onto the pile and torches it. Timestamp key so back-to-back
+      // burns (rare, but legal) each restart the animation.
+      setBurn({ id: Date.now(), spec: event.card, rect: to })
+      clearTimeout(burnTimer.current)
+      burnTimer.current = setTimeout(() => setBurn(null), BURN_CLEANUP_MS)
+    } else if (event.kind === 'play' || (event.kind === 'flip' && event.played)) {
+      let from
+      if (event.player_id !== myId) {
+        from = rectOf(seatRefs.current[event.player_id])
+      } else if (event.kind === 'flip') {
+        from = rectOf(blindRowRef.current)
+      } else if (pendingTapRef.current?.spec === event.card) {
+        from = pendingTapRef.current.rect
+      } else {
+        // Our play but no matching tap (e.g. this tab was reclaimed after a
+        // play from another device) — fall back to the hand area.
+        from = rectOf(youAreaRef.current)
+      }
+      if (from) {
+        setFlights((cur) => [
+          // cap concurrent ghosts; stale ones are already invisible
+          ...cur.slice(-2),
+          { id: `${event.card}-${Date.now()}`, spec: event.card, from, to },
+        ])
+      }
+    }
+    pendingTapRef.current = null
+
+    if (event.forced) {
+      setForcedFlash({ playerId: event.player_id })
+      clearTimeout(flashTimer.current)
+      flashTimer.current = setTimeout(() => setForcedFlash(null), FORCED_FLASH_MS)
+    }
+  }
 
   const { gameState, status, sendAction, reclaim } = useGameSocket(session.roomCode, session.token, {
     onServerError: (payload) => {
@@ -21,18 +91,26 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
       setError(payload)
       toastTimer.current = setTimeout(() => setError(null), 4000)
     },
-    onEvent: (event) => {
+    onEvent: (event, state) => {
       setLastEvent(event)
       // The table moved, so any complaint about the old state is stale —
       // drop it rather than leave a card marked against a pile it no
       // longer refers to.
       clearTimeout(toastTimer.current)
       setError(null)
+      runMotion(event, state)
     },
     onFatalClose,
   })
 
-  useEffect(() => () => clearTimeout(toastTimer.current), [])
+  useEffect(
+    () => () => {
+      clearTimeout(toastTimer.current)
+      clearTimeout(burnTimer.current)
+      clearTimeout(flashTimer.current)
+    },
+    []
+  )
 
   const secondsLeft = useTurnCountdown(gameState)
 
@@ -55,8 +133,13 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   const rejectedCard = error?.code === 'illegal_move' ? error.card : null
 
   // Never block a tap on legality — the server is the only judge. We only
-  // dim things that are obviously not actionable right now.
-  const playCard = (spec) => sendAction({ action: 'play', card: spec })
+  // dim things that are obviously not actionable right now. The tapped
+  // element's rect is remembered so that if the server accepts the play,
+  // the flight animation can start from the exact card that was tapped.
+  const playCard = (spec, el) => {
+    pendingTapRef.current = { spec, rect: rectOf(el) }
+    sendAction({ action: 'play', card: spec })
+  }
   const flipBlind = (index) => sendAction({ action: 'flip', index })
   const pickUpPile = () => sendAction({ action: 'pick_up' })
 
@@ -82,15 +165,22 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
             key={opponent.player_id}
             player={opponent}
             isCurrent={opponent.player_id === gameState.current_player_id}
+            flashForced={forcedFlash?.playerId === opponent.player_id}
             arcOffset={Math.abs(i - (opponents.length - 1) / 2) * 7}
+            seatRef={(el) => (seatRefs.current[opponent.player_id] = el)}
           />
         ))}
       </section>
 
+      {/* Keys make React remount the banner when whose-turn (not just its
+          styling) changes, which retriggers the banner-in entrance. Styling
+          shifts on the SAME turn — urgent restyle, waiting threshold — keep
+          the mount and glide via the CSS color transitions instead. */}
       {gameState.game_over ? (
-        <TurnBanner className="turn-banner--over" text="Game over" />
+        <TurnBanner key="over" className="turn-banner--over" text="Game over" />
       ) : myTurn ? (
         <TurnBanner
+          key="you"
           className={
             'turn-banner--you' +
             (secondsLeft != null && secondsLeft <= URGENT_SECONDS ? ' turn-banner--urgent' : '')
@@ -100,11 +190,15 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
           {secondsLeft != null && <span className="turn-countdown">{secondsLeft}s</span>}
         </TurnBanner>
       ) : secondsLeft != null && secondsLeft <= STALL_WARNING_SECONDS ? (
-        <TurnBanner className="turn-banner--waiting" text={`Waiting on ${currentName ?? '…'}`}>
+        <TurnBanner
+          key={`turn-${gameState.current_player_id}`}
+          className="turn-banner--waiting"
+          text={`Waiting on ${currentName ?? '…'}`}
+        >
           <span className="turn-countdown">{secondsLeft}s</span>
         </TurnBanner>
       ) : (
-        <TurnBanner text={`${currentName ?? '…'}'s turn`} />
+        <TurnBanner key={`turn-${gameState.current_player_id}`} text={`${currentName ?? '…'}'s turn`} />
       )}
 
       {gameState.seven_pending && (
@@ -123,23 +217,39 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
           <span className="zone-caption">deck · {gameState.draw_deck_count}</span>
         </div>
 
-        <DiscardPile pile={gameState.discard_pile} />
+        <DiscardPile pile={gameState.discard_pile} stackRef={discardRef} burning={burn != null} />
       </section>
 
-      <p className="event-line" aria-live="polite">
+      <p
+        className={lastEvent?.forced ? 'event-line event-line--forced' : 'event-line'}
+        aria-live="polite"
+      >
         {lastEvent ? describeEvent(lastEvent, nameById) : ' '}
       </p>
 
-      <section className="you-area" aria-label="Your cards">
+      <section
+        ref={youAreaRef}
+        className={
+          forcedFlash?.playerId === you.player_id ? 'you-area you-area--forced' : 'you-area'
+        }
+        aria-label="Your cards"
+      >
         <div className="you-row you-row--blind">
-          <span className="row-caption">
+          <span
+            className={
+              you.active_layer === 'blind' && !you.finish_position
+                ? 'row-caption row-caption--active'
+                : 'row-caption'
+            }
+          >
             blind{you.active_layer === 'blind' && !you.finish_position ? ' — tap to flip!' : ''}
           </span>
-          <div className="row-cards">
+          <div className="row-cards" ref={blindRowRef}>
             {Array.from({ length: you.blind_count }, (_, i) => (
               <Card
                 key={i}
                 hidden
+                patternSeed={`${you.player_id}:${i}`}
                 size="sm"
                 dimmed={you.active_layer !== 'blind' || !myTurn}
                 onClick={() => flipBlind(i)}
@@ -151,7 +261,13 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         </div>
 
         <div className="you-row you-row--faceup">
-          <span className="row-caption">face-up</span>
+          <span
+            className={
+              you.active_layer === 'face_up' ? 'row-caption row-caption--active' : 'row-caption'
+            }
+          >
+            face-up{you.active_layer === 'face_up' ? ' — in play' : ''}
+          </span>
           <div className="row-cards">
             {you.face_up.map((spec, i) => (
               <Card
@@ -160,7 +276,7 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 size="sm"
                 dimmed={you.active_layer !== 'face_up' || !myTurn}
                 rejected={spec === rejectedCard}
-                onClick={() => playCard(spec)}
+                onClick={(e) => playCard(spec, e.currentTarget)}
               />
             ))}
             {you.face_up.length === 0 && <span className="row-empty">cleared</span>}
@@ -187,13 +303,31 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 size="md"
                 dimmed={you.active_layer !== 'hand' || !myTurn}
                 rejected={spec === rejectedCard}
-                onClick={() => playCard(spec)}
+                onClick={(e) => playCard(spec, e.currentTarget)}
               />
             ))}
             {you.hand.length === 0 && <span className="row-empty">empty</span>}
           </div>
         </div>
       </section>
+
+      {flights.map((flight) => (
+        <FlightCard
+          key={flight.id}
+          flight={flight}
+          onDone={() => setFlights((cur) => cur.filter((f) => f.id !== flight.id))}
+        />
+      ))}
+
+      {burn && (
+        <div
+          className="burn-ghost"
+          style={{ left: burn.rect.x, top: burn.rect.y, width: burn.rect.w, height: burn.rect.h }}
+          aria-hidden="true"
+        >
+          <Card spec={burn.spec} size="lg" />
+        </div>
+      )}
 
       {error && (
         <div className={`toast toast--${error.code}`} role="alert">{error.message}</div>
@@ -260,11 +394,15 @@ function ConnectionBanner({ status, onReclaim }) {
   )
 }
 
-function OpponentSeat({ player, isCurrent, arcOffset }) {
+function OpponentSeat({ player, isCurrent, flashForced, arcOffset, seatRef }) {
   const finished = player.finish_position != null
+  const classes = ['opponent']
+  if (isCurrent) classes.push('opponent--current')
+  if (flashForced) classes.push('opponent--forced')
   return (
     <div
-      className={isCurrent ? 'opponent opponent--current' : 'opponent'}
+      ref={seatRef}
+      className={classes.join(' ')}
       style={{ transform: `translateY(${arcOffset}px)` }}
     >
       <span className="avatar" aria-hidden="true">{player.name.charAt(0).toUpperCase()}</span>
@@ -288,7 +426,7 @@ function OpponentSeat({ player, isCurrent, arcOffset }) {
   )
 }
 
-function DiscardPile({ pile }) {
+function DiscardPile({ pile, stackRef, burning }) {
   const topCard = pile.length > 0 ? pile[pile.length - 1] : null
 
   // Consecutive power cards on top of the pile stay visible as a fanned
@@ -302,14 +440,18 @@ function DiscardPile({ pile }) {
 
   return (
     <div className="discard">
-      <div className="discard-stack">
+      <div className={burning ? 'discard-stack discard-stack--burning' : 'discard-stack'} ref={stackRef}>
         {fanned.map((spec, i) => (
           <div key={`${spec}-${i}`} className="discard-under" style={{ transform: `translateX(${(i - fanned.length) * 14}px) rotate(${(i - fanned.length) * 4}deg)` }}>
             <Card spec={spec} size="sm" />
           </div>
         ))}
         {topCard ? (
-          <Card spec={topCard} size="lg" />
+          // Keyed per state change so a new top card re-runs the 150ms
+          // arrive animation (the flight ghost lands right on top of it).
+          <div key={`${topCard}-${pile.length}`} className="discard-top">
+            <Card spec={topCard} size="lg" />
+          </div>
         ) : (
           <div className="card card--lg card--slot">
             <span className="slot-text">any card</span>
@@ -317,6 +459,51 @@ function DiscardPile({ pile }) {
         )}
       </div>
       <span className="zone-caption">pile · {pile.length}</span>
+    </div>
+  )
+}
+
+// A played card's ghost, flying from where it was tapped (or from the
+// player's seat, for opponents) to the discard pile. Anchored at the
+// destination and transformed back to the source, so the browser only ever
+// animates transform/opacity. Purely decorative: the real state swap has
+// already happened underneath, and pointer-events never pass through it.
+function FlightCard({ flight, onDone }) {
+  const [arrived, setArrived] = useState(false)
+
+  useEffect(() => {
+    // Double rAF: the first frame must paint at the source position before
+    // the transition target is set, or the browser skips the animation.
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setArrived(true)))
+    const timer = setTimeout(onDone, FLIGHT_CLEANUP_MS)
+    return () => {
+      cancelAnimationFrame(raf)
+      clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per ghost
+  }, [])
+
+  const { from, to, spec } = flight
+  const dx = from.x + from.w / 2 - (to.x + to.w / 2)
+  const dy = from.y + from.h / 2 - (to.y + to.h / 2)
+  const startScale = Math.max(from.h / to.h, 0.2)
+
+  return (
+    <div
+      className="flight"
+      style={{
+        left: to.x,
+        top: to.y,
+        width: to.w,
+        height: to.h,
+        transform: arrived
+          ? 'translate(0px, 0px) scale(1)'
+          : `translate(${dx}px, ${dy}px) scale(${startScale})`,
+        opacity: arrived ? 0 : 1,
+      }}
+      aria-hidden="true"
+    >
+      <Card spec={spec} size="lg" />
     </div>
   )
 }
