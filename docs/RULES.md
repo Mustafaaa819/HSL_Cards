@@ -42,6 +42,14 @@ Power cards can be played on top of ANY card, regardless of rank, ignoring the h
 - **10 — Nuke:** Can be played on anything. Immediately clears/burns the entire discard pile out of the game. The nuker does NOT get a bonus turn — playing the 10 counts as their full action for the turn, and play passes to the next player normally, who now faces an empty pile and can throw anything.
 - **J — Reverse:** Can be played on anything. Reverses turn order direction. In 2-player games this has no functional effect on who goes next (turn order is unaffected by direction with only 2 players), but is still legal to play as a power card.
 
+## Multi-card plays (duplicates)
+- A player may play multiple cards of the same rank together as a single turn action, instead of just one — e.g. three 6s regardless of suit, or two 7s. Applies to plain ranks and power ranks alike.
+- Legality is checked once, using the shared rank: if a single card of that rank would be a legal play (beats the pile top, or is a power card), the whole group is legal. All cards in the group must share the same rank — mixed-rank groups (including mixed power ranks, e.g. a 2 and a 7 together) are NOT a valid single play. Power-card stacking across different ranks still happens one card at a time, as separate plays (see Power cards above).
+- All cards in the group must come from the player's single currently-active layer (hand, face-up, or a merged pickup hand). A player cannot combine cards from two different layers into one throw.
+- The group counts as ONE turn action. After it resolves, the discard pile top is the played rank, and play passes to the next player exactly as it would after a single-card play of that rank — same power-card effects apply once (a group of 7s still constrains only the immediate next player; a group of 10s still burns the pile with no bonus turn; a group of 2s or Js behaves like their single-card versions).
+- Does NOT apply in the blind phase (Layer 1). Blind reveals are strictly one card at a time, forced, with no player choice — there's nothing to group together.
+- **Explicitly NOT included:** no bonus/auto-burn for playing all four of a rank (a common house-rule variant in this genre). Not implied by this rule, not added. If you want it, say so — it needs its own decision.
+
 ## Win/loss condition
 - The game does NOT end when the first player empties all three layers. Play continues until only one player remains holding cards. Full finishing order is tracked and shown: 1st place, 2nd, 3rd, etc., with the last player holding cards ranked last. Not binary win/loss — every player's finish position matters.
 
@@ -62,6 +70,6 @@ These weren't explicitly stated in earlier rules discussion but were required to
 - **A failed blind-flip reveal joins the player's new picked-up hand.** It cannot return face-down, since it's already been seen by the table.
 - **All pickups — from the deck phase, hand phase, or a failed blind flip — land in the player's private hand (Layer 3), even if the player was actively playing from their face-up Layer 2 at the time.** The player clears that hand before resuming whatever face-up cards they had left.
 - **Layer transitions (hand → face-up → blind) cannot happen during the deck phase.** The turn-start draw keeps refilling the hand, so face-up and blind stay locked until the shared deck is empty.
-- **Exactly one card is played per turn.** No playing multiple cards of the same rank together in a single move, even though this exists as an option in some games in this genre. This may be revisited as a future variant, not in v1.
+- **SUPERSEDED (2026-07-16) — see "Multi-card plays" above.** Originally locked as exactly one card per turn, no same-rank grouping. That's reversed: multi-card plays of the same rank are now in scope. The engine's validate→mutate path currently only handles one card per action and needs updating — this is not just a doc change.
 - **First player is seat 0, in join order.** Arbitrary and easily changed later (e.g. randomized, or loser-of-last-game starts).
 - **Voluntary pickup requires a non-empty pile.** It cannot be used as a pass/skip action.

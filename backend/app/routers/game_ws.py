@@ -18,12 +18,15 @@ Protocol decisions (documented per the Phase 3 spec):
   existing socket; the old one is closed with WS_SUPERSEDED. The new
   socket immediately receives a full filtered snapshot.
 
-- ACTIONS: {"action": "play", "card": "7H"} | {"action": "pick_up"} |
-  {"action": "flip", "index": 0}. There is deliberately NO "draw"
-  action: the engine draws for the current player automatically at turn
-  start during the deck phase (no decision involved). The "index" on
-  flip is optional and cosmetic — which physical face-down card gets
-  tapped — since blind cards are unknown by definition.
+- ACTIONS: {"action": "play", "card": "7H"} |
+  {"action": "play", "cards": ["6H", "6C"]} (same-rank group as one
+  action; exactly one of "card"/"cards" per message) |
+  {"action": "pick_up"} | {"action": "flip", "index": 0}. There is
+  deliberately NO "draw" action: the engine draws for the current player
+  automatically at turn start during the deck phase (no decision
+  involved). The "index" on flip is optional and cosmetic — which
+  physical face-down card gets tapped — since blind cards are unknown by
+  definition.
 
 - AFK (Phase 5): each turn gets TURN_TIMEOUT_SECONDS. On expiry the
   server forces a move for the current player (see _force_afk_move) and
@@ -199,6 +202,10 @@ def _describe_error(room: Room, err: Exception, message: dict) -> tuple[str, str
     code = "protocol" if isinstance(err, ProtocolError) else "illegal_move"
     # Echo the rejected card back so the client can highlight that exact
     # card rather than guessing which tap the error belongs to.
+    # Known gap, deliberately left for the multi-select UI phase: a rejected
+    # multi-card play ({"cards": [...]}) echoes null here, since only the
+    # single-card "card" field is read. No client sends "cards" yet, so
+    # nothing can miss the highlight today.
     card = message.get("card") if message.get("action") == "play" else None
     return str(err), code, card if isinstance(card, str) else None
 
@@ -209,18 +216,16 @@ def _apply_action(game: Game, player_id: str, message: dict) -> dict:
     action = message.get("action")
 
     if action == "play":
-        spec = message.get("card")
-        if not isinstance(spec, str):
-            raise ProtocolError('The "play" action needs a "card" string like "7H"')
-        try:
-            card = Card.from_str(spec)
-        except (ValueError, IndexError):
-            raise ProtocolError(f"Unrecognized card: {spec!r}") from None
-        result = game.play_card(player_id, card)
+        cards = _parse_play_cards(message)
+        result = game.play_cards(player_id, cards)
+        # "card" stays the first card of the group: the current frontend's
+        # fly-in/burn animation and log line only know one card and aren't
+        # being touched this phase. "cards" carries the full group.
         return {
             "kind": "play",
             "player_id": player_id,
             "card": str(result.card),
+            "cards": [str(card) for card in result.cards],
             "pile_burned": result.pile_burned,
             "direction_reversed": result.direction_reversed,
             "player_finished": result.player_finished,
@@ -240,6 +245,37 @@ def _apply_action(game: Game, player_id: str, message: dict) -> dict:
     # Note there is no "skip" here, and there must not be: Game.skip_turn is
     # the AFK timer's fallback only, never something a client can ask for.
     raise ProtocolError(f"Unknown action: {action!r}")
+
+
+def _parse_play_cards(message: dict) -> list[Card]:
+    """Parse a "play" action's card(s): the legacy single-card shape
+    {"card": "7H"} or the multi-card shape {"cards": ["6H", "6C"]}.
+    Exactly one of the two must be present. Structure is validated here;
+    rule legality (same rank, availability, beats the pile) is the engine's."""
+    has_card = "card" in message
+    has_cards = "cards" in message
+    if has_card and has_cards:
+        raise ProtocolError('The "play" action takes "card" or "cards", not both')
+
+    if has_cards:
+        specs = message.get("cards")
+        if not isinstance(specs, list) or not specs or not all(isinstance(s, str) for s in specs):
+            raise ProtocolError('"cards" must be a non-empty array of card strings like ["6H", "6C"]')
+    else:
+        # Covers both a missing card and a non-string one, with the same
+        # wording the single-card protocol has always used.
+        spec = message.get("card")
+        if not isinstance(spec, str):
+            raise ProtocolError('The "play" action needs a "card" string like "7H"')
+        specs = [spec]
+
+    cards = []
+    for spec in specs:
+        try:
+            cards.append(Card.from_str(spec))
+        except (ValueError, IndexError):
+            raise ProtocolError(f"Unrecognized card: {spec!r}") from None
+    return cards
 
 
 def _pickup_event(player_id: str, count: int, *, forced: bool) -> dict:

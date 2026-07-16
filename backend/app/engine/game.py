@@ -13,7 +13,7 @@ begins. Every action method then completes the turn and advances play.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .cards import SEVEN_CAP, Card, build_deck
@@ -41,6 +41,13 @@ class PlayResult:
     direction_reversed: bool = False
     player_finished: bool = False
     game_over: bool = False
+    # The full same-rank group; defaults to just `card` so single-card call
+    # sites (and tests constructing PlayResult directly) need no changes.
+    cards: list[Card] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.cards:
+            self.cards = [self.card]
 
 
 @dataclass
@@ -170,24 +177,59 @@ class Game:
     # ---------------------------------------------------------------- actions
 
     def play_card(self, player_id: str, card: Card) -> PlayResult:
+        return self.play_cards(player_id, [card])
+
+    def play_cards(self, player_id: str, cards: list[Card]) -> PlayResult:
+        """Play one or more same-rank cards as a single turn action.
+
+        Per RULES.md "Multi-card plays": legality is checked once via the
+        shared rank, all cards must come from the one active layer, and
+        power effects apply once per group (two Jacks flip direction once,
+        not twice).
+        """
+        if not cards:
+            raise IllegalMoveError("You must play at least one card")
+        if any(card.rank != cards[0].rank for card in cards):
+            raise IllegalMoveError("All cards in one play must share the same rank")
+
         player = self._require_turn(player_id)
         layer = self.active_layer(player)
         if layer is Layer.BLIND:
             raise IllegalMoveError("You are on your blind cards: flip, don't play")
         source = player.hand if layer is Layer.HAND else player.face_up
-        if card not in source:
-            raise IllegalMoveError(f"{card} is not in your {layer.value}")
-        if not self.is_legal_play(card):
+        # Availability by count, not membership: two-deck games hold genuine
+        # (rank, suit) duplicates, so each requested card must be matched by
+        # its own copy. Checked on a scratch copy so a mid-group failure
+        # leaves the real layer untouched.
+        available = list(source)
+        for card in cards:
+            try:
+                available.remove(card)
+            except ValueError:
+                raise IllegalMoveError(f"{card} is not in your {layer.value}") from None
+        # All same rank, so any one card stands in for the whole group.
+        representative = cards[0]
+        if not self.is_legal_play(representative):
             top = self.top_card
             if self.seven_pending:
-                raise IllegalMoveError(f"{card} doesn't satisfy the 7 constraint (need ≤7 or a power card)")
-            raise IllegalMoveError(f"{card} doesn't beat {top}")
+                raise IllegalMoveError(
+                    f"{representative} doesn't satisfy the 7 constraint (need ≤7 or a power card)"
+                )
+            raise IllegalMoveError(f"{representative} doesn't beat {top}")
 
-        source.remove(card)
-        pile_burned, direction_reversed = self._apply_card_effects(card)
+        for card in cards:
+            source.remove(card)
+        pile_burned, direction_reversed = self._apply_group_effects(cards)
         player_finished = self._check_finish(player)
-        result = PlayResult(card, pile_burned, direction_reversed, player_finished, self.game_over)
-        self._end_turn(card)
+        result = PlayResult(
+            representative,
+            pile_burned,
+            direction_reversed,
+            player_finished,
+            self.game_over,
+            cards=list(cards),
+        )
+        self._end_turn(representative)
         return result
 
     def pick_up_pile(self, player_id: str) -> int:
@@ -217,7 +259,7 @@ class Game:
 
         card = player.blind.pop(index)
         if self.is_legal_play(card):
-            pile_burned, direction_reversed = self._apply_card_effects(card)
+            pile_burned, direction_reversed = self._apply_group_effects([card])
             player_finished = self._check_finish(player)
             result = FlipResult(
                 card, True, pile_burned, direction_reversed, 0, player_finished, self.game_over
@@ -266,20 +308,24 @@ class Game:
             raise OutOfTurnError(self.current_player.player_id, player_id)
         return player
 
-    def _apply_card_effects(self, card: Card) -> tuple[bool, bool]:
-        """Put the card on the pile and apply its power effect.
+    def _apply_group_effects(self, cards: list[Card]) -> tuple[bool, bool]:
+        """Put a same-rank group on the pile and apply its power effect ONCE
+        for the whole group (a blind flip passes a single-card list).
         Returns (pile_burned, direction_reversed)."""
-        if card.rank == "10":
-            # Nuke: the whole pile, including the 10 itself, leaves the game.
+        rank = cards[0].rank
+        if rank == "10":
+            # Nuke: the whole pile, including the played 10(s), leaves the game.
             self.burned.extend(self.discard_pile)
-            self.burned.append(card)
+            self.burned.extend(cards)
             self.discard_pile = []
             return True, False
-        if card.rank == "J":
+        if rank == "J":
+            # Exactly one flip per group: two Jacks thrown together must not
+            # cancel each other out (RULES.md: behaves like the single-card J).
             self.direction *= -1
-            self.discard_pile.append(card)
+            self.discard_pile.extend(cards)
             return False, True
-        self.discard_pile.append(card)
+        self.discard_pile.extend(cards)
         return False, False
 
     def _check_finish(self, player: Player) -> bool:

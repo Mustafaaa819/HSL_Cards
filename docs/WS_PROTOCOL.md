@@ -32,6 +32,14 @@ for the current player automatically at turn start during the deck phase.
 
 - `{"action": "play", "card": "7H"}` — card format is `<rank><suit>`, ranks
   `2`–`10`, `J`, `Q`, `K`, `A`; suits `C D H S`.
+- `{"action": "play", "cards": ["6H", "6C", "6D"]}` — multi-card play: a
+  same-rank group thrown as one turn action (see RULES.md "Multi-card
+  plays"). `"cards"` must be a non-empty array of card strings; a `play`
+  frame must carry exactly one of `"card"` or `"cards"` — both, or neither,
+  is a `protocol` error. Same-rank/availability/legality checks are the
+  engine's, rejected as `illegal_move` like any single-card play. **The
+  current frontend only ever sends the single-card form** — this shape
+  exists on the wire but has no client using it yet.
 - `{"action": "pick_up"}` — take the discard pile (voluntary or forced).
 - `{"action": "flip"}` — blind flip. Optional `"index": <int>` picks which
   face-down card (cosmetic — they're unknown by definition; defaults to 0).
@@ -68,6 +76,9 @@ wording is passed through rather than flattened to "Illegal move".
 `card` is the card string from a rejected `play`, echoed back so the client
 can highlight **that exact card** instead of guessing which tap the error
 belongs to. It is `null` for every other error, including `out_of_turn`.
+A rejected multi-card play (`"cards"` form) also comes back with `card:
+null` — echoing the offending group member is deferred until a client
+actually sends that form.
 
 ## AFK / turn timeout
 
@@ -101,7 +112,11 @@ filtered view**, never identical payloads.
 
 `event` describes what just happened publicly:
 
-- `{"kind": "play", "player_id", "card", "pile_burned", "direction_reversed", "player_finished"}`
+- `{"kind": "play", "player_id", "card", "cards", "pile_burned", "direction_reversed", "player_finished"}`
+  — `cards` is the full same-rank group played (a single-card play makes it
+  a one-element list). `card` stays as the **first** card of the group for
+  backward compatibility: the current frontend's fly-in/burn animation and
+  log line only know how to show one card and aren't changing this phase.
 - `{"kind": "pickup", "player_id", "count", "forced"}`
 - `{"kind": "flip", "player_id", "card", "played", "pile_burned", "direction_reversed", "picked_up", "player_finished", "forced"}`
   — the flip event is the ONLY thing that ever reveals a blind card.
