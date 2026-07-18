@@ -59,6 +59,11 @@ def filtered_state(room: Room, viewer_id: str) -> dict:
         "direction": game.direction,
         "current_player_id": None if game.game_over else game.current_player.player_id,
         "seven_pending": game.seven_pending,
+        # Non-null while the current player owes a follow-up before the turn
+        # can pass: "throw" (must play a card) or "flip" (must flip another
+        # blind card). Without this, a client has no way to know a pickup or
+        # a played 2 did NOT pass the turn.
+        "pending_action": None if game.game_over else game.pending_action,
         "draw_deck_count": len(game.draw_deck),
         "discard_pile": _cards(game.discard_pile),
         "top_card": str(game.top_card) if game.top_card else None,

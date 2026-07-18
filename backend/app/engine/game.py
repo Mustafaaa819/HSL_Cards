@@ -7,7 +7,12 @@ translate exceptions into client error messages.
 
 Turn model: the deck-phase draw ("on your turn, draw one card") carries no
 decision, so the engine performs it automatically the moment a player's turn
-begins. Every action method then completes the turn and advances play.
+begins. Every action method then either completes the turn and advances
+play, or leaves the SAME player on the clock with a pending follow-up
+(`pending_throw`): any pickup demands an immediate throw, and a played 2 is
+a bonus action that demands one more play (see RULES.md "Follow-up throws").
+The turn-start draw never re-runs for a follow-up — it belongs to the turn,
+not the action.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ class PlayResult:
     # The full same-rank group; defaults to just `card` so single-card call
     # sites (and tests constructing PlayResult directly) need no changes.
     cards: list[Card] = field(default_factory=list)
+    # True when a played 2 armed a follow-up: the turn did NOT pass and the
+    # same player must play one more card before it does.
+    must_throw_again: bool = False
 
     def __post_init__(self) -> None:
         if not self.cards:
@@ -59,6 +67,10 @@ class FlipResult:
     picked_up: int = 0  # cards taken into hand on a failed flip (pile + the flip)
     player_finished: bool = False
     game_over: bool = False
+    # A flipped 2 chains: the turn did not pass, call flip_blind again.
+    must_flip_again: bool = False
+    # A failed flip's pickup demands a throw from the new hand (turn not passed).
+    must_throw_again: bool = False
 
 
 class Game:
@@ -87,6 +99,10 @@ class Game:
         self.current_index: int = 0
         # True while the current player is under a just-played 7's constraint.
         self.seven_pending: bool = False
+        # True while the current player owes a follow-up action before the
+        # turn may pass: armed by any pickup and by any resolved 2. Pickup is
+        # rejected while armed, so the follow-up can't be dodged.
+        self.pending_throw: bool = False
         self.finish_order: list[str] = []
         self.game_over: bool = False
 
@@ -101,6 +117,7 @@ class Game:
         direction: int = 1,
         current_index: int = 0,
         seven_pending: bool = False,
+        pending_throw: bool = False,
     ) -> "Game":
         """Build a game from an explicit mid-game state (tests, and later
         server-side restore). Runs the normal turn-start step, so during the
@@ -114,6 +131,7 @@ class Game:
         game.direction = direction
         game.current_index = current_index
         game.seven_pending = seven_pending
+        game.pending_throw = pending_throw
         finished = [p for p in game.players if p.finished]
         finished.sort(key=lambda p: p.finish_position)
         game.finish_order = [p.player_id for p in finished]
@@ -134,6 +152,16 @@ class Game:
     @property
     def phase(self) -> Phase:
         return Phase.DECK if self.draw_deck else Phase.HAND
+
+    @property
+    def pending_action(self) -> str | None:
+        """What the current player owes before the turn can pass: "throw"
+        (play a card from hand/face-up) or "flip" (their active layer is
+        blind, so the follow-up is a forced flip), or None. One flag, two
+        spellings — the required action follows the active layer."""
+        if not self.pending_throw:
+            return None
+        return "flip" if self.active_layer(self.current_player) is Layer.BLIND else "throw"
 
     def active_layer(self, player: Player) -> Layer:
         # While the draw deck lives, the hand is always the active layer:
@@ -221,6 +249,10 @@ class Game:
             source.remove(card)
         pile_burned, direction_reversed = self._apply_group_effects(cards)
         player_finished = self._check_finish(player)
+        # A 2 is a bonus action: the same player owes one more throw. A group
+        # of 2s arms this ONCE, like every other group effect; a follow-up
+        # that is itself a 2 re-arms it, so chains need no special handling.
+        must_throw_again = representative.rank == "2" and self._arm_followup(player)
         result = PlayResult(
             representative,
             pile_burned,
@@ -228,16 +260,26 @@ class Game:
             player_finished,
             self.game_over,
             cards=list(cards),
+            must_throw_again=must_throw_again,
         )
-        self._end_turn(representative)
+        if not must_throw_again:
+            self._end_turn(representative)
         return result
 
-    def pick_up_pile(self, player_id: str) -> int:
+    def pick_up_pile(self, player_id: str, *, system: bool = False) -> int:
         """Take the whole discard pile into hand — voluntary or forced.
-        Returns the number of cards picked up."""
+        Returns the number of cards picked up.
+
+        Every pickup arms a mandatory follow-up throw (`pending_throw`): the
+        turn does not pass until the picker plays a card. While that debt is
+        open a second pickup is rejected — except for `system=True`, the AFK
+        timer's escape hatch for a player stuck mid-follow-up with a
+        non-empty pile (the one state with no other forceable move)."""
         player = self._require_turn(player_id)
         if self.active_layer(player) is Layer.BLIND:
             raise IllegalMoveError("No pickup in the blind phase: you must flip a card first")
+        if self.pending_throw and not system:
+            raise IllegalMoveError("You must throw a card first — no picking up until you do")
         if not self.discard_pile:
             raise IllegalMoveError("The discard pile is empty")
         count = len(self.discard_pile)
@@ -245,7 +287,11 @@ class Game:
         # the player was playing from their face-up layer.
         player.hand.extend(self.discard_pile)
         self.discard_pile = []
-        self._end_turn(None)
+        # Picking up already paid the 7's price — the constraint must not
+        # also cap the mandatory follow-up throw.
+        self.seven_pending = False
+        if not self._arm_followup(player):
+            self._end_turn(None)
         return count
 
     def flip_blind(self, player_id: str, index: int = 0) -> FlipResult:
@@ -261,17 +307,34 @@ class Game:
         if self.is_legal_play(card):
             pile_burned, direction_reversed = self._apply_group_effects([card])
             player_finished = self._check_finish(player)
+            # A blind 2 chains: the same player must flip their next blind
+            # card too — the engine stays one-action-per-call, so the chain
+            # is driven by the client calling flip_blind again. Running out
+            # of blind cards on the 2 itself is the finish path, not a chain.
+            must_flip_again = card.rank == "2" and self._arm_followup(player)
             result = FlipResult(
-                card, True, pile_burned, direction_reversed, 0, player_finished, self.game_over
+                card,
+                True,
+                pile_burned,
+                direction_reversed,
+                0,
+                player_finished,
+                self.game_over,
+                must_flip_again=must_flip_again,
             )
-            self._end_turn(card)
+            if not must_flip_again:
+                self._end_turn(card)
         else:
             picked_up = len(self.discard_pile) + 1
             player.hand.extend(self.discard_pile)
             player.hand.append(card)  # the failed flip joins the new hand too
             self.discard_pile = []
-            result = FlipResult(card, False, picked_up=picked_up)
-            self._end_turn(None)
+            self.seven_pending = False  # paid for by the pickup, same as pick_up_pile
+            # The pickup rule applies here too: the new hand owes a throw.
+            must_throw_again = self._arm_followup(player)
+            result = FlipResult(card, False, picked_up=picked_up, must_throw_again=must_throw_again)
+            if not must_throw_again:
+                self._end_turn(None)
         return result
 
     def skip_turn(self, player_id: str) -> None:
@@ -286,6 +349,11 @@ class Game:
 
         The empty-pile guard keeps that contract enforceable in the engine
         rather than resting on the server layer's discretion.
+
+        A skip also discharges an unpaid follow-up throw (`pending_throw`):
+        after the AFK timer forces a pickup, the pile is empty and the owed
+        throw is a real choice the server won't make, so the next expiry
+        lands here and the turn finally passes (via _end_turn's clear).
         """
         self._require_turn(player_id)
         if self.discard_pile:
@@ -328,6 +396,38 @@ class Game:
         self.discard_pile.extend(cards)
         return False, False
 
+    def _arm_followup(self, player: Player) -> bool:
+        """Shared continuation primitive for pickups and 2s: keep the turn
+        with the same player by arming `pending_throw`, unless there is
+        nothing left to act with. Returns True if armed.
+
+        Waivers: a player who just finished owes nothing; and a player whose
+        recomputed active layer is empty ends their turn normally. During the
+        deck phase the active layer is locked to HAND (RULES.md), so a 2 that
+        was the last hand card waives the follow-up instead of reaching into
+        face-up/blind — and no mid-turn draw happens, since the turn-start
+        draw already did. For a pickup the layer can't be empty (the pile
+        just landed in hand); the guard exists for composition with the 2.
+        """
+        self.pending_throw = False
+        if player.finished:
+            return False
+        layer = self.active_layer(player)
+        if layer is Layer.HAND:
+            source = player.hand
+        elif layer is Layer.FACE_UP:
+            source = player.face_up
+        else:
+            source = player.blind
+        if not source:
+            return False
+        self.pending_throw = True
+        # Whatever 7 constraint bound this player was satisfied (a 2 is a
+        # power card) or paid for (pickup) by the action that armed this —
+        # it must not carry into the follow-up.
+        self.seven_pending = False
+        return True
+
     def _check_finish(self, player: Player) -> bool:
         # A player can't be done while the draw deck lives — their next turn
         # would start with a draw.
@@ -346,6 +446,9 @@ class Game:
         return True
 
     def _end_turn(self, played_card: Card | None) -> None:
+        # The turn is genuinely over, so no follow-up debt survives it. This
+        # is also how skip_turn discharges an AFK player's unpaid throw.
+        self.pending_throw = False
         # The 7 constraint binds exactly one player: whoever acts next after
         # a 7 is played. Any other outcome (including a pickup) clears it.
         self.seven_pending = played_card is not None and played_card.rank == "7"

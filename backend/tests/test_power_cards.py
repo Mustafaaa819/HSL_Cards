@@ -64,8 +64,12 @@ def test_seven_forces_pickup_when_no_low_card_or_power():
     assert game.must_pick_up("b")
     game.pick_up_pile("b")
     assert card("7H") in game.players[1].hand
-    # The constraint dies with the pickup: c plays high freely.
+    # The constraint dies at the moment of pickup — b's mandatory follow-up
+    # throw is NOT capped at ≤7 (a 9 is fine on the now-empty pile).
     assert not game.seven_pending
+    assert game.pending_action == "throw"
+    game.play_card("b", card("9C"))
+    # And c is free of it too: a king plays high with no complaint.
     game.play_card("c", card("KH"))
 
 

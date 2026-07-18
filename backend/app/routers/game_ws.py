@@ -229,11 +229,12 @@ def _apply_action(game: Game, player_id: str, message: dict) -> dict:
             "pile_burned": result.pile_burned,
             "direction_reversed": result.direction_reversed,
             "player_finished": result.player_finished,
+            "must_throw_again": result.must_throw_again,
         }
 
     if action == "pick_up":
         count = game.pick_up_pile(player_id)
-        return _pickup_event(player_id, count, forced=False)
+        return _pickup_event(player_id, count, forced=False, must_throw_again=game.pending_throw)
 
     if action == "flip":
         index = message.get("index", 0)
@@ -278,8 +279,14 @@ def _parse_play_cards(message: dict) -> list[Card]:
     return cards
 
 
-def _pickup_event(player_id: str, count: int, *, forced: bool) -> dict:
-    return {"kind": "pickup", "player_id": player_id, "count": count, "forced": forced}
+def _pickup_event(player_id: str, count: int, *, forced: bool, must_throw_again: bool) -> dict:
+    return {
+        "kind": "pickup",
+        "player_id": player_id,
+        "count": count,
+        "forced": forced,
+        "must_throw_again": must_throw_again,
+    }
 
 
 def _flip_event(player_id: str, result: FlipResult, *, forced: bool) -> dict:
@@ -295,6 +302,8 @@ def _flip_event(player_id: str, result: FlipResult, *, forced: bool) -> dict:
         "picked_up": result.picked_up,
         "player_finished": result.player_finished,
         "forced": forced,
+        "must_flip_again": result.must_flip_again,
+        "must_throw_again": result.must_throw_again,
     }
 
 
@@ -310,12 +319,22 @@ async def _force_afk_move(room: Room) -> None:
 
     1. On blind cards: flip. There's no decision to make here anyway — the
        rules say reveal one at random — so the forced move is exactly the
-       move the player would have had.
+       move the player would have had. A 2-chain's forced flips arrive one
+       per expiry through this same branch.
     2. Pile has cards: pick it up. The normal penalty for not acting.
-    3. Empty pile: skip. Pickup is illegal with nothing to pick up, so this
-       is the only option left that isn't a guess. It's a self-penalty (they
-       keep their cards while everyone else sheds theirs), which is also why
-       it's safe to have as a fallback — there's no incentive to go AFK for it.
+       `system=True` lets this through even when the player is stuck
+       mid-follow-up ("threw a 2, owes a throw"), where a client pickup is
+       rejected — the same resolution an unanswered pile always had. The
+       pickup arms the mandatory throw, which stays a real choice the
+       server won't make, so the player gets one more clock...
+    3. Empty pile: skip. ...and if that expires too, the skip discharges
+       the owed throw and the turn finally passes. Pickup is illegal with
+       nothing to pick up, so this is the only option left that isn't a
+       guess. It's a self-penalty (they keep their cards while everyone
+       else sheds theirs), which is also why it's safe to have as a
+       fallback — there's no incentive to go AFK for it. Net effect: a
+       fully AFK player's turn can take two expiries (pickup, then skip)
+       instead of one — the cost of never choosing a card for them.
     """
     game = room.game
     if game is None or game.game_over:
@@ -328,7 +347,10 @@ async def _force_afk_move(room: Room) -> None:
             # still-unflipped card — earlier flips left no gap behind them.
             event = _flip_event(player_id, game.flip_blind(player_id, 0), forced=True)
         elif game.discard_pile:
-            event = _pickup_event(player_id, game.pick_up_pile(player_id), forced=True)
+            count = game.pick_up_pile(player_id, system=True)
+            event = _pickup_event(
+                player_id, count, forced=True, must_throw_again=game.pending_throw
+            )
         else:
             game.skip_turn(player_id)
             event = {"kind": "skip", "player_id": player_id, "forced": True}

@@ -1,4 +1,4 @@
-# Game WebSocket protocol (Phase 3, + Phase 5 AFK/errors)
+# Game WebSocket protocol (Phase 3, + Phase 5 AFK/errors, + 2026-07-18 follow-up throws)
 
 Endpoint: `ws(s)://<host>/ws/{room_code}` — live game sync only. The lobby
 (create/join/ready/start) stays on the REST endpoints; connect the socket
@@ -41,8 +41,18 @@ for the current player automatically at turn start during the deck phase.
   current frontend only ever sends the single-card form** — this shape
   exists on the wire but has no client using it yet.
 - `{"action": "pick_up"}` — take the discard pile (voluntary or forced).
+  Rejected as `illegal_move` while a follow-up throw is pending (see
+  `pending_action` below) — the mandatory throw can't be dodged by picking
+  up again.
 - `{"action": "flip"}` — blind flip. Optional `"index": <int>` picks which
   face-down card (cosmetic — they're unknown by definition; defaults to 0).
+
+**Follow-up throws (RULES.md "Follow-up throws", 2026-07-18):** a pickup or
+a resolved 2 does NOT pass the turn. The same player must send one more
+action — a `play` (or a `flip`, if their active layer is blind) — before
+play advances. The server signals this via `pending_action` in every state
+payload and `must_throw_again` / `must_flip_again` on events; there is no
+new client action, just another `play`/`flip` from the same player.
 
 That is the complete list. Notably there is **no "skip" action** — the
 server can pass an AFK player's turn (see below), but a skip is never
@@ -93,11 +103,20 @@ no-choice outcomes are forced, in order:
 
 1. **On blind cards** → flip the next unflipped blind card. A flip carries
    no decision anyway, so this is exactly the move they would have made.
-2. **Pile has cards** → pick up the pile. The normal penalty for not acting.
-3. **Empty pile** → skip the turn (`{"kind": "skip", …}`). With nothing to
-   pick up there is no forceable move left. The skipper keeps their whole
-   hand while everyone else sheds cards, so this is a self-penalty, not an
-   exploit.
+   A blind 2-chain's forced flips arrive one per expiry.
+2. **Pile has cards** → pick up the pile. The normal penalty for not
+   acting. This is forced even for a player stuck mid-follow-up ("threw a
+   2, owes a throw", where a client `pick_up` is rejected) — a
+   system-level override, and the same resolution an unanswered pile
+   always had. The forced pickup arms the mandatory follow-up throw, which
+   remains a real choice the server won't make, so the player gets a fresh
+   clock...
+3. **Empty pile** → skip the turn (`{"kind": "skip", …}`). ...and on that
+   expiry the skip discharges any owed follow-up throw and the turn
+   passes. With nothing to pick up there is no forceable move left. The
+   skipper keeps their whole hand while everyone else sheds cards, so this
+   is a self-penalty, not an exploit. Net effect: a fully AFK player's
+   turn can take two expiries (forced pickup, then skip) instead of one.
 
 The clock is cancelled at game over and when the last socket in a room
 disconnects (an abandoned room must not keep forcing moves at itself).
@@ -112,15 +131,24 @@ filtered view**, never identical payloads.
 
 `event` describes what just happened publicly:
 
-- `{"kind": "play", "player_id", "card", "cards", "pile_burned", "direction_reversed", "player_finished"}`
+- `{"kind": "play", "player_id", "card", "cards", "pile_burned", "direction_reversed", "player_finished", "must_throw_again"}`
   — `cards` is the full same-rank group played (a single-card play makes it
   a one-element list). `card` stays as the **first** card of the group for
   backward compatibility: the current frontend's fly-in/burn animation and
   log line only know how to show one card and aren't changing this phase.
-- `{"kind": "pickup", "player_id", "count", "forced"}`
-- `{"kind": "flip", "player_id", "card", "played", "pile_burned", "direction_reversed", "picked_up", "player_finished", "forced"}`
+  `must_throw_again` is `true` when the play was a 2 that armed a follow-up
+  throw — the turn did NOT pass.
+- `{"kind": "pickup", "player_id", "count", "forced", "must_throw_again"}`
+  — `must_throw_again` is `true` whenever the pickup armed the mandatory
+  follow-up throw (i.e. almost always; `false` only in the waived edge
+  cases per RULES.md).
+- `{"kind": "flip", "player_id", "card", "played", "pile_burned", "direction_reversed", "picked_up", "player_finished", "forced", "must_flip_again", "must_throw_again"}`
   — the flip event is the ONLY thing that ever reveals a blind card.
+  `must_flip_again` is `true` when a flipped 2 chains (same player must
+  call `flip` again); `must_throw_again` is `true` when a failed flip's
+  pickup armed the follow-up throw. Both `true` mean the turn did not pass.
 - `{"kind": "skip", "player_id", "forced"}` — AFK timeout on an empty pile.
+  Also discharges any owed follow-up throw.
 
 `forced` is `true` when the AFK timer produced the move rather than the
 player, so the UI can say "timed out" instead of "picked up". There is no
@@ -136,6 +164,11 @@ player, so the UI can say "timed out" instead of "picked up". There is no
   "direction": 1 | -1,
   "current_player_id": "…" | null,   // null once game_over
   "seven_pending": false,            // next player constrained to ≤7 / power
+  "pending_action": null,            // "throw" | "flip" | null — non-null while the
+                                     // CURRENT player owes a follow-up before the turn
+                                     // can pass (pickup throw / 2 bonus throw / blind
+                                     // 2-chain flip). The client MUST read this to know
+                                     // a pickup or a 2 did not pass the turn.
   "draw_deck_count": 30,             // count only, never identities
   "discard_pile": ["6H", "JD"],      // full pile, bottom → top (public)
   "top_card": "JD" | null,

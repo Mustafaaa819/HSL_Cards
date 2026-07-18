@@ -270,6 +270,21 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         </p>
       )}
 
+      {/* Minimal follow-up signal (full UI treatment is a later phase):
+          without this line the table looks like it's waiting on the wrong
+          player, since a pickup or a 2 no longer passes the turn. */}
+      {gameState.pending_action && !gameState.game_over && (
+        <p className={myTurn ? 'seven-warning seven-warning--you' : 'seven-warning'}>
+          {myTurn
+            ? gameState.pending_action === 'flip'
+              ? 'Bonus flip — flip another blind card!'
+              : 'Throw again — play one more card to end your turn'
+            : `${currentName ?? 'Someone'} must ${
+                gameState.pending_action === 'flip' ? 'flip' : 'throw'
+              } again`}
+        </p>
+      )}
+
       <section className="table-center">
         <div className="draw-deck">
           {gameState.draw_deck_count > 0 ? (
@@ -387,7 +402,9 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
               <button
                 className="button button--pickup"
                 type="button"
-                disabled={gameState.game_over}
+                // A pending follow-up bars pickup server-side; dim the button
+                // so the rule is visible before the error toast would be.
+                disabled={gameState.game_over || (myTurn && gameState.pending_action != null)}
                 onClick={pickUpPile}
               >
                 Pick up pile
@@ -650,12 +667,15 @@ function describeEvent(event, nameById) {
     let text = `${name} played ${prettyCard(event.card)}`
     if (event.pile_burned) text += ' — pile burned!'
     if (event.direction_reversed) text += ' — direction reversed'
+    if (event.must_throw_again) text += ' — throws again!'
     if (event.player_finished) text += ` · ${name} is out!`
     return text
   }
   if (event.kind === 'pickup') {
     const how = event.forced ? 'timed out — picked up the pile' : 'picked up the pile'
-    return `${name} ${how} (${event.count} ${event.count === 1 ? 'card' : 'cards'})`
+    let text = `${name} ${how} (${event.count} ${event.count === 1 ? 'card' : 'cards'})`
+    if (event.must_throw_again) text += ' — must throw a card'
+    return text
   }
   if (event.kind === 'skip') {
     return `${name} timed out — turn skipped`
@@ -668,9 +688,11 @@ function describeEvent(event, nameById) {
       text += ' — it plays!'
       if (event.pile_burned) text += ' Pile burned!'
       if (event.direction_reversed) text += ' Direction reversed.'
+      if (event.must_flip_again) text += ' Flips again!'
       if (event.player_finished) text += ` ${name} is out!`
     } else if (event.picked_up) {
       text += ' — no good, pile picked up'
+      if (event.must_throw_again) text += ' — must throw a card'
     }
     return text
   }

@@ -72,14 +72,19 @@ def test_non_power_must_beat_jack_as_normal_rank():
         game.play_card("a", card("9D"))
 
 
-def test_two_resets_pile_for_next_player():
+def test_two_resets_pile_and_thrower_takes_the_bonus_throw():
     game = make_game(
-        {"a": {"hand": ["2S", "9D"]}, "b": {"hand": ["3C", "4C"]}},
+        {"a": {"hand": ["2S", "3D", "9D"]}, "b": {"hand": ["4C", "KC"]}},
         discard=["KH"],
     )
     game.play_card("a", card("2S"))
-    game.play_card("b", card("3C"))  # anything beats a 2
-    assert game.top_card == card("3C")
+    # Since 2026-07-18 the reset benefits its own thrower first: the 2 is a
+    # bonus action, and the mandatory follow-up sees the reset pile — even
+    # the lowly 3 beats a 2.
+    game.play_card("a", card("3D"))
+    assert game.top_card == card("3D")
+    game.play_card("b", card("4C"))  # and play passes normally afterwards
+    assert game.top_card == card("4C")
 
 
 def test_anything_legal_on_empty_pile():

@@ -12,7 +12,7 @@ def test_layer_transitions_and_failed_flip_cycle():
     game = make_game(
         {
             "a": {"hand": ["9C"], "face_up": ["AD", "3S"], "blind": ["4S", "6S"]},
-            "b": {"hand": ["KC", "2C", "8C", "5C", "9H"]},
+            "b": {"hand": ["KC", "10C", "8C", "5C", "9H"]},
         },
         discard=["5H"],
     )
@@ -23,21 +23,25 @@ def test_layer_transitions_and_failed_flip_cycle():
 
     game.play_card("b", card("KC"))
     game.play_card("a", card("AD"))  # played from face-up, beats the king
-    game.play_card("b", card("2C"))  # reset
+    game.play_card("b", card("10C"))  # nuke — empty pile for a
     game.play_card("a", card("3S"))  # face-up now empty
     assert game.active_layer(player_a) is Layer.BLIND
 
     game.play_card("b", card("8C"))
 
-    # Pile is 5H 9C KC AD 2C 3S 8C = 7 cards. Blind flip: 4S can't beat 8.
+    # Pile is 3S 8C = 2 cards. Blind flip: 4S can't beat 8.
     result = game.flip_blind("a")
     assert result.card == card("4S")
     assert not result.played
-    assert result.picked_up == 8  # the pile plus the failed flip
+    assert result.picked_up == 3  # the pile plus the failed flip
+    assert result.must_throw_again  # the pickup's mandatory throw applies here too
     assert card("8C") in player_a.hand and card("4S") in player_a.hand
     assert player_a.blind == [card("6S")]  # untouched, waiting on the table
     assert game.discard_pile == []
     assert game.active_layer(player_a) is Layer.HAND  # back to hand-style play
+    assert game.current_player.player_id == "a"  # ...and still on the clock
+    game.play_card("a", card("8C"))  # the owed throw passes the turn
+    assert game.current_player.player_id == "b"
 
 
 def test_blind_flip_success_plays_the_card():
@@ -54,12 +58,21 @@ def test_blind_flip_success_plays_the_card():
 
 def test_blind_flip_power_card_beats_anything():
     game = make_game(
-        {"a": {"blind": ["2S", "3S"]}, "b": {"hand": ["3C", "4D", "5D"]}},
+        {"a": {"blind": ["2S", "3S", "4S"]}, "b": {"hand": ["3C", "4D", "5D"]}},
         discard=["KH"],
     )
     result = game.flip_blind("a")
     assert result.played
     assert game.top_card == card("2S")
+    # A blind 2 chains: same player is forced onto their next blind card.
+    assert result.must_flip_again
+    assert game.current_player.player_id == "a"
+    assert game.pending_action == "flip"
+    result = game.flip_blind("a")
+    assert result.card == card("3S") and result.played  # 3 beats the 2
+    assert not result.must_flip_again  # a non-2 ends the chain
+    assert game.players[0].blind == [card("4S")]
+    assert game.current_player.player_id == "b"
 
 
 def test_blind_flip_ten_burns_pile():

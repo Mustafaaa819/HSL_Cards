@@ -232,13 +232,27 @@ def test_full_match_over_websockets_reaches_a_finishing_order():
 
         # P1's 9D can't beat KH — forced pickup; the pile lands in their HAND
         # (Layer 3) even though they were on face-up cards, per RULES.md.
+        # The pickup does NOT pass the turn: P1 owes an immediate throw.
         event, state = step(ws1, {"action": "pick_up"})
-        assert event == {"kind": "pickup", "player_id": p1, "count": 3, "forced": False}
+        assert event == {
+            "kind": "pickup",
+            "player_id": p1,
+            "count": 3,
+            "forced": False,
+            "must_throw_again": True,
+        }
         assert state["you"]["hand"] == ["3H", "5C", "KH"]
         assert state["you"]["face_up"] == ["9D"]
         assert state["top_card"] is None
+        assert state["current_player_id"] == p1
+        assert state["pending_action"] == "throw"
 
-        # P0's blind flip: 4H on an empty pile is legal. Last card gone —
+        # The owed throw, from the merged hand — only now does the turn pass.
+        event, state = step(ws1, {"action": "play", "card": "3H"})
+        assert state["current_player_id"] == p0
+        assert state["pending_action"] is None
+
+        # P0's blind flip: 4H beats the 3H. Last card gone —
         # P0 finishes 1st, P1 is last, game over. The flip event is what
         # reveals the card to the table.
         event, state = step(ws0, {"action": "flip"})

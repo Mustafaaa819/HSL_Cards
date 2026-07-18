@@ -59,12 +59,29 @@ def test_afk_forces_a_pickup_when_the_pile_has_cards():
         # P1 never acts. Both sockets get the forced pickup, flagged as
         # forced so the UI can say "timed out" rather than "picked up".
         event = ws0.receive_json()["event"]
-        assert event == {"kind": "pickup", "player_id": p1, "count": 2, "forced": True}
+        assert event == {
+            "kind": "pickup",
+            "player_id": p1,
+            "count": 2,
+            "forced": True,
+            "must_throw_again": True,
+        }
 
         state = ws1.receive_json()["state"]
         assert state["you"]["hand"] == ["3D", "QS", "8S", "9C"]
         assert state["discard_pile"] == []
-        assert state["current_player_id"] == p0  # play moves on past the AFK player
+        # The pickup arms the mandatory throw: P1 is STILL on the clock.
+        assert state["current_player_id"] == p1
+        assert state["pending_action"] == "throw"
+
+        # The owed throw is a real choice the server won't make, so the next
+        # expiry resolves it with the empty-pile skip — only now does play
+        # move on past the AFK player.
+        message = ws0.receive_json()
+        ws1.receive_json()
+        assert message["event"] == {"kind": "skip", "player_id": p1, "forced": True}
+        assert message["state"]["current_player_id"] == p0
+        assert message["state"]["pending_action"] is None
 
 
 def test_afk_on_blind_cards_forces_a_flip():
@@ -99,7 +116,10 @@ def test_afk_on_blind_cards_forces_a_flip():
         assert event["card"] == "8D"  # the first still-unflipped blind card
         assert event["played"] is False  # 8D can't beat the 9C on top
         assert event["picked_up"] == 3  # 8S + 9C + the failed flip
+        assert event["must_throw_again"] is True  # the pickup's owed throw
         assert player_entry(message["state"], p1)["blind_count"] == 1
+        assert message["state"]["current_player_id"] == p1
+        assert message["state"]["pending_action"] == "throw"
 
 
 def test_afk_on_an_empty_pile_forces_a_skip():
@@ -131,6 +151,61 @@ def test_afk_on_an_empty_pile_forces_a_skip():
         assert message["event"] == {"kind": "skip", "player_id": p1, "forced": True}
         assert player_entry(message["state"], p1)["hand_count"] == 2
         assert message["state"]["current_player_id"] == p0
+
+
+def test_afk_stuck_mid_two_gets_a_forced_pickup_then_a_skip():
+    """A player throws a 2 (owes a follow-up throw, pickup barred) and goes
+    AFK: the system's override pickup is the fallback — the same resolution
+    an unanswered pile always had — then the next expiry's skip finally
+    passes the turn."""
+    code, members = make_started_room(2)
+    p0, p1 = (m["player_id"] for m in members)
+    rig_game(
+        code,
+        {
+            p0: {"hand": ["9C", "KD"], "blind": ["4H"]},
+            p1: {"hand": ["2D", "QS", "3D"], "blind": ["8D"]},
+        },
+        discard=["8S"],
+        current=p1,
+    )
+
+    with ExitStack() as stack:
+        ws0, _ = connect(stack, code, members[0]["token"])
+        ws1, _ = connect(stack, code, members[1]["token"])
+
+        go_afk()
+        ws1.send_json({"action": "play", "card": "2D"})
+        message = ws1.receive_json()
+        assert message["event"]["must_throw_again"] is True
+        assert message["state"]["pending_action"] == "throw"
+        ws0.receive_json()
+
+        # A client pickup is rejected mid-follow-up...
+        ws1.send_json({"action": "pick_up"})
+        message = ws1.receive_json()
+        assert message["type"] == "error"
+        assert "throw" in message["message"].lower()
+
+        # ...but the AFK timer's system pickup goes through: the 8S + 2D pile
+        # lands in P1's hand, and the throw is owed again.
+        message = ws1.receive_json()
+        assert message["event"] == {
+            "kind": "pickup",
+            "player_id": p1,
+            "count": 2,
+            "forced": True,
+            "must_throw_again": True,
+        }
+        assert message["state"]["current_player_id"] == p1
+        ws0.receive_json()
+
+        # Second expiry: the skip discharges the owed throw. Play moves on.
+        message = ws1.receive_json()
+        assert message["event"] == {"kind": "skip", "player_id": p1, "forced": True}
+        assert message["state"]["current_player_id"] == p0
+        assert message["state"]["pending_action"] is None
+        ws0.receive_json()
 
 
 def test_skip_is_not_reachable_as_a_client_action():

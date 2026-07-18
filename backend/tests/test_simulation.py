@@ -41,9 +41,21 @@ def test_random_playouts_conserve_cards_and_terminate(num_players):
             else:
                 plays = game.legal_plays(pid)
                 # Mostly play when possible, occasionally pick up voluntarily
-                # to exercise that path too.
-                if plays and (rng.random() < 0.9 or not game.discard_pile):
-                    game.play_card(pid, rng.choice(plays))
+                # to exercise that path too. A pending follow-up throw bars
+                # pickup — and guarantees a legal play exists (empty pile, or
+                # a 2 on top that anything beats).
+                if plays and (game.pending_throw or rng.random() < 0.9 or not game.discard_pile):
+                    # Half the plays shed the lowest legal card. Purely
+                    # uniform choice stopped converging once pickups gained
+                    # a mandatory follow-up throw (2026-07-18): the picker
+                    # now restarts the pile themselves, so the opponent
+                    # never gets a free empty-pile turn, and two players
+                    # squandering aces at random can loop for 300k+ actions.
+                    # A dash of shed-low realism keeps worst cases ~19k.
+                    if rng.random() < 0.5:
+                        game.play_card(pid, min(plays, key=lambda c: c.value))
+                    else:
+                        game.play_card(pid, rng.choice(plays))
                 else:
                     game.pick_up_pile(pid)
             # Checking the full multiset every step would dominate runtime;
