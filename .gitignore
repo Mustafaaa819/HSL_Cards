@@ -10,6 +10,9 @@ frontend/node_modules/
 frontend/dist/
 *.local
 
+# Built frontend copied into backend for the no-Docker manual serve workflow
+backend/static/
+
 # Editors / OS
 .vscode/*
 !.vscode/extensions.json

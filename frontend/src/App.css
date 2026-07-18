@@ -317,6 +317,16 @@
   opacity: 0.45;
 }
 
+/* Picked into a pending multi-card throw. Teal, not the gold power glow or
+   the red rejected glow — those already mean something else. Declared after
+   .card--power so a selected power card reads as selected, and before
+   .card--rejected so a refusal still wins. */
+.card--selected {
+  border: 2px solid var(--safe);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--safe) 55%, transparent);
+  transform: translateY(-4px);
+}
+
 /* The card the server just refused. Declared after .card--power so a
    rejected power card reads as rejected, not golden. Lives only as long as
    the error toast (~4s, cleared sooner if the table moves). */
@@ -793,6 +803,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* Throw-multiples toggle / Cancel / Play N live next to the pickup button;
+   they swap in place, so the group keeps the header from reflowing. */
+.hand-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .button--pickup {

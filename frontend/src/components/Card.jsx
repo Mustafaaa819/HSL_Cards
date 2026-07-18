@@ -13,7 +13,8 @@ import { generateBackPattern } from '../cardback.js'
 // md (own hand) / lg (top of the discard pile).
 //
 // `rejected` marks the card the server just refused — the toast says why,
-// this says which.
+// this says which. `selected` marks a card picked into a pending
+// multi-card throw (GameScreen's "Throw multiples" mode).
 export default function Card({
   spec,
   hidden = false,
@@ -21,6 +22,7 @@ export default function Card({
   size = 'md',
   dimmed = false,
   rejected = false,
+  selected = false,
   onClick,
   label,
 }) {
@@ -30,6 +32,7 @@ export default function Card({
   const classes = ['card', `card--${size}`]
   if (dimmed) classes.push('card--dimmed')
   if (rejected) classes.push('card--rejected')
+  if (selected) classes.push('card--selected')
 
   if (hidden) {
     classes.push('card--back')

@@ -1,7 +1,15 @@
 FROM node:22-slim AS frontend-build
 WORKDIR /frontend
-COPY frontend/package*.json ./
-RUN npm ci
+# Deliberately NOT copying package-lock.json: it's regenerated on the
+# developer's Windows machine, and a persistent npm bug
+# (github.com/npm/cli/issues/4828 — hit twice already in this project, once
+# for local Vite/rolldown, once here for lightningcss) can silently skip
+# installing a platform-specific optional native binary, and an existing
+# lockfile from a different OS makes that worse by steering resolution.
+# Upgrading npm and resolving fresh from package.json alone, with no
+# lockfile influence at all, is the standard workaround for this bug.
+COPY frontend/package.json ./
+RUN npm install -g npm@latest && npm install
 COPY frontend/ ./
 RUN npm run build
 

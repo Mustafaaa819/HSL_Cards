@@ -28,6 +28,14 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   const [lastEvent, setLastEvent] = useState(null)
   const toastTimer = useRef(null)
 
+  // Opt-in "Throw multiples" mode: while on, hand/face-up taps toggle
+  // selection instead of playing instantly. Entries keep the tapped
+  // element's rect (same reason as pendingTapRef — the flight animation
+  // needs a start point) plus a row-positional id, so two copies of the
+  // same card in a two-deck game stay individually selectable.
+  const [multiSelectMode, setMultiSelectMode] = useState(false)
+  const [selection, setSelection] = useState([]) // [{ id, spec, rect }]
+
   // Transient motion layer: cards mid-flight to the pile, the burn ghost of
   // a just-nuked pile, and the danger flash on whoever the AFK timer moved
   // for. All render as fixed-position overlays (pointer-events: none), so
@@ -112,6 +120,22 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
     []
   )
 
+  // A snapshot can reshape the rows mid-selection (AFK-forced pickup, a
+  // reclaim from another tab). Selection ids are positional within the
+  // rendered rows, so prune whatever the new snapshot no longer backs
+  // rather than letting a confirm send cards that moved out from under it.
+  useEffect(() => {
+    if (!gameState) return
+    const validIds = new Set([
+      ...sortHand(gameState.you.hand).map((spec, i) => `hand-${spec}-${i}`),
+      ...gameState.you.face_up.map((spec, i) => `faceup-${spec}-${i}`),
+    ])
+    setSelection((cur) => {
+      const kept = cur.filter((s) => validIds.has(s.id))
+      return kept.length === cur.length ? cur : kept
+    })
+  }, [gameState])
+
   const secondsLeft = useTurnCountdown(gameState)
 
   if (!gameState) {
@@ -142,6 +166,45 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   }
   const flipBlind = (index) => sendAction({ action: 'flip', index })
   const pickUpPile = () => sendAction({ action: 'pick_up' })
+
+  const selectionRank = selection.length > 0 ? parseCard(selection[0].spec).rank : null
+  const selectedIds = new Set(selection.map((s) => s.id))
+
+  // The same-rank rule below is a selection-shape rule, not a legality
+  // check: a mixed-rank group isn't a move for the server to arbitrate,
+  // it's a shape this UI can't express — same category as `dimmed`, an
+  // obviously-not-actionable client-side hint.
+  const tapCard = (id, spec, el) => {
+    if (!multiSelectMode) {
+      playCard(spec, el)
+      return
+    }
+    if (selectedIds.has(id)) {
+      setSelection((cur) => cur.filter((s) => s.id !== id))
+    } else if (selectionRank == null || parseCard(spec).rank === selectionRank) {
+      setSelection((cur) => [...cur, { id, spec, rect: rectOf(el) }])
+    }
+    // rank mismatch: no-op — the card is rendered dimmed to say why
+  }
+
+  const exitMultiSelect = () => {
+    setMultiSelectMode(false)
+    setSelection([])
+  }
+
+  const confirmMultiPlay = () => {
+    if (selection.length === 0) return
+    // Only the first selected card gets a flight animation: the play
+    // event's `card` is documented as the first card of the group, and
+    // runMotion animates exactly one ghost. The rest of the group just
+    // vanishes from the row when the next snapshot lands — simultaneous
+    // multi-card flight is deferred to a later phase.
+    pendingTapRef.current = { spec: selection[0].spec, rect: selection[0].rect }
+    sendAction({ action: 'play', cards: selection.map((s) => s.spec) })
+    // Exit optimistically; a rejection surfaces through the normal error
+    // toast and the player re-selects if they want to retry.
+    exitMultiSelect()
+  }
 
   return (
     <main className="screen game">
@@ -269,16 +332,22 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
             face-up{you.active_layer === 'face_up' ? ' — in play' : ''}
           </span>
           <div className="row-cards">
-            {you.face_up.map((spec, i) => (
-              <Card
-                key={`${spec}-${i}`}
-                spec={spec}
-                size="sm"
-                dimmed={you.active_layer !== 'face_up' || !myTurn}
-                rejected={spec === rejectedCard}
-                onClick={(e) => playCard(spec, e.currentTarget)}
-              />
-            ))}
+            {you.face_up.map((spec, i) => {
+              const id = `faceup-${spec}-${i}`
+              const rankMismatch =
+                multiSelectMode && selectionRank != null && parseCard(spec).rank !== selectionRank
+              return (
+                <Card
+                  key={`${spec}-${i}`}
+                  spec={spec}
+                  size="sm"
+                  dimmed={you.active_layer !== 'face_up' || !myTurn || rankMismatch}
+                  selected={selectedIds.has(id)}
+                  rejected={spec === rejectedCard}
+                  onClick={(e) => tapCard(id, spec, e.currentTarget)}
+                />
+              )
+            })}
             {you.face_up.length === 0 && <span className="row-empty">cleared</span>}
           </div>
         </div>
@@ -286,26 +355,62 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         <div className="you-row you-row--hand">
           <div className="hand-header">
             <span className="row-caption">hand · {you.hand.length}</span>
-            <button
-              className="button button--pickup"
-              type="button"
-              disabled={gameState.game_over}
-              onClick={pickUpPile}
-            >
-              Pick up pile
-            </button>
+            <div className="hand-actions">
+              {multiSelectMode ? (
+                <>
+                  <button
+                    className="button button--tiny button--quiet"
+                    type="button"
+                    onClick={exitMultiSelect}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="button button--tiny button--gold"
+                    type="button"
+                    disabled={selection.length === 0}
+                    onClick={confirmMultiPlay}
+                  >
+                    Play {selection.length}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="button button--tiny button--quiet"
+                  type="button"
+                  disabled={gameState.game_over}
+                  onClick={() => setMultiSelectMode(true)}
+                >
+                  Throw multiples
+                </button>
+              )}
+              <button
+                className="button button--pickup"
+                type="button"
+                disabled={gameState.game_over}
+                onClick={pickUpPile}
+              >
+                Pick up pile
+              </button>
+            </div>
           </div>
           <div className="row-cards row-cards--hand">
-            {sortHand(you.hand).map((spec, i) => (
-              <Card
-                key={`${spec}-${i}`}
-                spec={spec}
-                size="md"
-                dimmed={you.active_layer !== 'hand' || !myTurn}
-                rejected={spec === rejectedCard}
-                onClick={(e) => playCard(spec, e.currentTarget)}
-              />
-            ))}
+            {sortHand(you.hand).map((spec, i) => {
+              const id = `hand-${spec}-${i}`
+              const rankMismatch =
+                multiSelectMode && selectionRank != null && parseCard(spec).rank !== selectionRank
+              return (
+                <Card
+                  key={`${spec}-${i}`}
+                  spec={spec}
+                  size="md"
+                  dimmed={you.active_layer !== 'hand' || !myTurn || rankMismatch}
+                  selected={selectedIds.has(id)}
+                  rejected={spec === rejectedCard}
+                  onClick={(e) => tapCard(id, spec, e.currentTarget)}
+                />
+              )
+            })}
             {you.hand.length === 0 && <span className="row-empty">empty</span>}
           </div>
         </div>
