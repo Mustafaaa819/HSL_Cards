@@ -45,11 +45,22 @@
   background: var(--surface-raised);
   font-size: 16px;
   font-weight: 600;
+  /* Faint top highlight + drop so buttons sit on the table, not in it. */
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06), 0 1px 3px rgb(0 0 0 / 0.35);
+  transition: transform 0.08s ease, filter 0.08s ease;
+}
+
+/* Press feedback — a phone game with no :active response feels dead even
+   when it's working. Quick and physical: sink + brighten. */
+.button:not(:disabled):active {
+  transform: scale(0.96);
+  filter: brightness(1.15);
 }
 
 .button:disabled {
   opacity: 0.45;
   cursor: default;
+  box-shadow: none;
 }
 
 .button--primary {
@@ -273,11 +284,38 @@
   border: 1px solid var(--border);
   padding: 0;
   flex: none;
+  /* Base elevation: every card lifts off the felt. Signal states below
+     (power/selected/rejected) swap this for their glow + a drop of their
+     own, so the glow never stacks on top of a second shadow. */
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.5), 0 4px 10px rgb(0 0 0 / 0.28);
+  transition: transform 0.08s ease, filter 0.08s ease;
+}
+
+/* Same press physics as buttons — cards are the main touch target. */
+button.card:not(:disabled):active {
+  transform: scale(0.93);
+  filter: brightness(1.2);
 }
 
 .card--face {
-  background: var(--card-face);
+  /* Dark card body under the transparent-ink art, with a soft top-left
+     sheen so the surface reads as material rather than a fill. */
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--card-face) 88%, white) 0%,
+    var(--card-face) 45%,
+    color-mix(in srgb, var(--card-face) 88%, black) 100%
+  );
   gap: 0;
+}
+
+.card-face-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
 }
 
 .card--red {
@@ -290,7 +328,9 @@
 
 .card--power {
   border: 2px solid var(--gold);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--gold) 55%, transparent);
+  box-shadow:
+    0 0 12px 2px color-mix(in srgb, var(--gold) 60%, transparent),
+    0 2px 6px rgb(0 0 0 / 0.4);
 }
 
 .card--back {
@@ -311,6 +351,7 @@
   background: transparent;
   border-style: dashed;
   color: var(--muted);
+  box-shadow: none; /* an empty outline casts no shadow */
 }
 
 .card--dimmed {
@@ -323,7 +364,9 @@
    .card--rejected so a refusal still wins. */
 .card--selected {
   border: 2px solid var(--safe);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--safe) 55%, transparent);
+  box-shadow:
+    0 0 10px 2px color-mix(in srgb, var(--safe) 60%, transparent),
+    0 3px 8px rgb(0 0 0 / 0.35);
   transform: translateY(-4px);
 }
 
@@ -332,7 +375,9 @@
    the error toast (~4s, cleared sooner if the table moves). */
 .card--rejected {
   border: 2px solid var(--danger);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 60%, transparent);
+  box-shadow:
+    0 0 12px 2px color-mix(in srgb, var(--danger) 65%, transparent),
+    0 2px 6px rgb(0 0 0 / 0.4);
   animation: card-rejected 0.3s ease-in-out 2;
 }
 
@@ -341,10 +386,14 @@
   75% { transform: translateX(3px); }
 }
 
+/* The condensed display face from the design system. Only the xs minis
+   still render typographic ranks (larger sizes are full art), but this is
+   also the face any future rank text should use. */
 .card-rank {
-  font-weight: 800;
+  font-family: var(--font-display);
+  font-weight: 600;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .card-suit {
@@ -425,58 +474,183 @@
   color: var(--text);
 }
 
-/* opponents arc */
+/* round table — every seat positioned by angle math (GameScreen seatPos);
+   nothing in here decides where a seat goes, only what a seat looks like. */
 
-.opponents {
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 4px 0 10px;
+.round-table {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  height: 340px;
+  margin: 0 auto;
+  flex: none;
 }
 
-.opponent {
+/* 2–3 players only use the top half-ish of the ring — reclaim the height
+   so the whole screen fits a phone without scrolling. */
+.round-table--few {
+  height: 310px;
+}
+
+/* The felt itself: a rich emerald surface shaped to the wood rim of the
+   frame art layered above it (the frame PNG's interior is transparent, so
+   this felt shows through the rim's opening naturally). */
+.round-table::before {
+  content: '';
+  position: absolute;
+  inset: 12% 6.5%;
+  border-radius: 30px / 36px;
+  background: radial-gradient(
+    95% 85% at 50% 38%,
+    color-mix(in srgb, var(--felt) 82%, white) 0%,
+    var(--felt) 50%,
+    color-mix(in srgb, var(--felt) 52%, black) 100%
+  );
+  border: 1px solid rgb(255 255 255 / 0.05);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    inset 0 0 36px rgb(0 0 0 / 0.35),
+    0 12px 30px rgb(0 0 0 / 0.35);
+}
+
+/* Wood-and-chips table frame (transparent interior) sitting over the felt.
+   Slightly darkened so the decoration stays behind the game, not in front
+   of it. */
+.round-table::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: url('./assets/table/table-frame.png') center / 100% 100% no-repeat;
+  filter: brightness(0.82) saturate(0.92);
+}
+
+/* Idle seats are bare markers sitting directly on the felt — no panel, no
+   background, no border. Only the current-turn seat (below) announces
+   itself as a box; the transparent border here keeps that swap from
+   shifting layout. */
+.seat {
+  position: absolute;
+  transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
-  padding: 6px 8px;
+  gap: 2px;
+  padding: 4px 6px 3px;
   border-radius: 10px;
   border: 1px solid transparent;
-  min-width: 72px;
+  max-width: 104px;
+  z-index: 3;
 }
 
-.opponent--current {
-  border-color: var(--gold);
-  background: color-mix(in srgb, var(--gold) 12%, var(--bg));
-  box-shadow: 0 0 10px color-mix(in srgb, var(--gold) 35%, transparent);
+.seat--current {
+  border-color: color-mix(in srgb, var(--gold) 65%, transparent);
+  background: color-mix(in srgb, var(--gold) 12%, color-mix(in srgb, var(--surface-raised) 55%, transparent));
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--gold) 30%, transparent),
+    0 0 18px 3px color-mix(in srgb, var(--gold) 38%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--gold) 25%, transparent);
 }
 
-.opponent-name {
-  font-size: 12px;
-  font-weight: 700;
-  max-width: 80px;
+.seat--forced {
+  animation: forced-flash 0.8s ease;
+}
+
+.seat-id {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.avatar--seat {
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+}
+
+.seat-name {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Bare markers sit straight on the felt now — the shadow keeps the tiny
+     label readable over the gradient without giving the seat a panel. */
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.6);
 }
 
-.opponent-counts {
+.seat--current .seat-name {
+  color: var(--text);
+}
+
+/* Compact per-seat preview: three columns, face-up card peeking out over
+   the blind card behind it. Column height = xs card (34) + overlap offset. */
+.seat-stack {
   display: flex;
-  gap: 8px;
-  font-size: 12px;
+  gap: 3px;
+}
+
+.stack-col {
+  position: relative;
+  width: 24px;
+  height: 46px;
+}
+
+.stack-blind,
+.stack-faceup {
+  position: absolute;
+  left: 0;
+}
+
+.stack-blind {
+  top: 0;
+}
+
+.stack-faceup {
+  top: 12px;
+  z-index: 1;
+}
+
+.seat-hand {
+  font-size: 11px;
   color: var(--muted);
 }
 
-.opponent-faceup {
-  display: flex;
-  gap: 2px;
-}
-
-.opponent-finished {
+.seat-finished {
   font-size: 13px;
   font-weight: 800;
   color: var(--safe);
+}
+
+/* Flow-of-play ring: chevrons between seats, marching in turn order. */
+
+.direction-ring {
+  position: absolute;
+  inset: 0;
+  /* Above the frame art (::after, z1) — chevrons near the rim must not
+     vanish under the wood. */
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ring-chevron {
+  position: absolute;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text);
+  opacity: 0.22;
+  animation: chevron-march 1.8s ease-in-out infinite;
+}
+
+@keyframes chevron-march {
+  30% {
+    opacity: 0.9;
+  }
 }
 
 /* turn + rule banners */
@@ -520,7 +694,7 @@
 
 @keyframes turn-pulse {
   50% {
-    box-shadow: 0 0 14px color-mix(in srgb, var(--gold) 45%, transparent);
+    box-shadow: 0 0 20px 3px color-mix(in srgb, var(--gold) 50%, transparent);
   }
 }
 
@@ -569,26 +743,51 @@
   animation: none;
 }
 
+/* Rank-constraint / follow-up notice as a compact glass pill (reference
+   1c's header pill, recolored for the dark palette). */
 .seven-warning {
-  margin: 0;
+  margin: 0 auto;
+  width: fit-content;
+  max-width: 100%;
   text-align: center;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 999px;
   color: var(--muted);
+  background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgb(255 255 255 / 0.08);
 }
 
 .seven-warning--you {
-  color: var(--danger);
+  color: color-mix(in srgb, var(--gold) 80%, var(--text));
+  border-color: color-mix(in srgb, var(--gold) 45%, transparent);
+  background: color-mix(in srgb, var(--gold) 10%, color-mix(in srgb, var(--surface-raised) 50%, transparent));
   font-weight: 700;
 }
 
-/* center table */
+/* center table (deck + pile hub, dead center of the round table) */
 
-.table-center {
+.table-hub {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   display: flex;
-  justify-content: center;
   align-items: flex-end;
-  gap: 34px;
-  padding: 8px 0;
+  gap: 12px;
+  z-index: 2;
+  padding: 10px 14px 8px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 8px 24px rgb(0 0 0 / 0.35);
 }
 
 .draw-deck,
@@ -616,6 +815,11 @@
    only needs to cover the frame where the ghost hasn't arrived yet. */
 .discard-top {
   animation: card-arrive 0.15s ease;
+  /* The pile's top card is the most important object on the table — give it
+     a deeper cast shadow than the base card elevation. drop-shadow on the
+     wrapper so it hugs the card and any glow together without fighting the
+     signal-state box-shadows. */
+  filter: drop-shadow(0 8px 14px rgb(0 0 0 / 0.45));
 }
 
 @keyframes card-arrive {
@@ -636,6 +840,18 @@
   z-index: 25;
   pointer-events: none;
   transition: transform 0.24s cubic-bezier(0.2, 0.7, 0.3, 1), opacity 0.14s ease 0.16s;
+  will-change: transform;
+}
+
+/* One dealt card of the match-start dealing sequence, deck → seat. The
+   transform duration pairs with DEAL_LAND_MS in GameScreen.jsx (the real
+   card appears just as the ghost arrives); opacity fades it over the
+   landed card. */
+.deal-flight {
+  position: fixed;
+  z-index: 25;
+  pointer-events: none;
+  transition: transform 0.3s cubic-bezier(0.3, 0.7, 0.4, 1), opacity 0.12s ease 0.26s;
   will-change: transform;
 }
 
@@ -697,10 +913,6 @@
 /* The AFK timer moved for someone. Same danger family as the stall warning
    so "the clock did this" reads consistently, and clearly distinct from the
    quiet look of the same action done voluntarily. */
-.opponent--forced {
-  animation: forced-flash 0.8s ease;
-}
-
 .you-area--forced {
   border-radius: 12px;
   animation: forced-flash 0.8s ease;
@@ -746,11 +958,32 @@
 
 /* your three layers */
 
+/* The interactive panel is the premium glass piece of the screen: frosted
+   dark panel at rest, heavy layered gold glow when it's your turn. */
 .you-area {
   margin-top: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  padding: 10px 10px 8px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 8px 24px rgb(0 0 0 / 0.35);
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+.you-area--turn {
+  border-color: color-mix(in srgb, var(--gold) 55%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--gold) 45%, transparent),
+    0 0 26px 4px color-mix(in srgb, var(--gold) 30%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--gold) 22%, transparent),
+    0 8px 24px rgb(0 0 0 / 0.35);
 }
 
 .you-row {
@@ -786,11 +1019,61 @@
   align-items: center;
 }
 
+/* Fanned hand: one or more stacked fan rows (GameScreen chunks the hand
+   at HAND_ROW_MAX), so a big picked-up pile wraps to a second row and
+   stays fully visible instead of scrolling sideways. Each row is its own
+   independent, self-centred fan. The fan transforms live on .fan-card
+   wrappers, NOT on the Card element itself — the card's own transform
+   states (selected lift, rejected shake, :active press) keep working
+   unchanged inside the rotated wrapper. */
 .row-cards--hand {
-  gap: 7px;
-  max-height: 34svh;
-  overflow-y: auto;
-  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  overflow: visible;
+  padding: 0;
+}
+
+.hand-fan {
+  display: flex;
+  align-items: flex-start;
+  width: max-content;
+  /* Never wider than the row — the chunk size keeps it from getting here,
+     this is just a floor under an unusually narrow viewport. */
+  max-width: 100%;
+  /* Top padding gives the raised/selected card room to lift, bottom
+     padding gives the arc's dropped edges + shadows room. */
+  padding: 10px 6px 4px;
+}
+
+/* A second row tucks under the first the way the cards within a row
+   overlap sideways — it keeps a wrapped hand inside a phone viewport
+   instead of pushing the bottom row below the fold. The later row paints
+   over the earlier one, so what gets covered is the previous row's bottom
+   edge; every card keeps well over half its height exposed to tap. */
+.hand-fan + .hand-fan {
+  margin-top: -12px;
+}
+
+.fan-card {
+  flex: none;
+  /* --fan-rot / --fan-lift set inline per card by GameScreen. */
+  transform: rotate(var(--fan-rot, 0deg)) translateY(var(--fan-lift, 0px));
+  transform-origin: 50% 90%;
+  transition: transform 0.15s ease;
+}
+
+.fan-card + .fan-card {
+  margin-left: -16px;
+}
+
+/* A selected card must pop above BOTH neighbours — the wrapper's inline
+   z-index only wins against cards to its left. */
+.fan-card--raised {
+  position: relative;
+  z-index: 60 !important;
 }
 
 .row-empty {
@@ -826,22 +1109,41 @@
    also in the state/text, so it can all be dropped for reduced-motion. */
 @media (prefers-reduced-motion: reduce) {
   .flight,
+  .deal-flight,
   .burn-ghost,
   .discard-top,
   .discard-stack--burning::after,
   .turn-banner,
   .turn-banner--you,
-  .opponent--forced,
+  .seat--forced,
   .you-area--forced,
   .event-line--forced,
+  .ring-chevron,
   .overlay,
   .overlay-panel {
     animation: none;
     transition: none;
   }
 
-  .flight {
+  /* Deal ghosts still drive the progressive fill via their timers — only
+     the flying visual is dropped, so the table quietly populates. */
+  .flight,
+  .deal-flight {
     display: none;
+  }
+
+  /* New in the visual-polish pass: press-feedback transitions go static
+     (the :active state itself still applies, instantly). */
+  .card,
+  .button {
+    transition: none;
+  }
+
+  /* Glass-table pass: the fan re-layout glide and the your-turn glow
+     fade go static (end states still apply, instantly). */
+  .fan-card,
+  .you-area {
+    transition: none;
   }
 }
 
@@ -912,6 +1214,7 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.55);
   animation: panel-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
 }
 

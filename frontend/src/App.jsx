@@ -11,6 +11,10 @@ export default function App() {
   const [session, setSession] = useState(loadSession)
   const [stage, setStage] = useState(session ? 'resolving' : 'entry')
   const [notice, setNotice] = useState(null)
+  // True only when the lobby just told us a match started — the one signal
+  // that distinguishes a genuine fresh start (deal animation plays) from a
+  // reload/reconnect resolving straight into 'game' (it must not).
+  const [freshStart, setFreshStart] = useState(false)
 
   // A reload mid-session (common on phones) lands here with a stored token:
   // ask the server whether that room is still in the lobby or already live.
@@ -49,6 +53,7 @@ export default function App() {
     clearSession()
     setSession(null)
     setNotice(message ?? null)
+    setFreshStart(false)
     setStage('entry')
   }
 
@@ -71,10 +76,26 @@ export default function App() {
     )
   }
   if (stage === 'lobby') {
-    return <LobbyScreen session={session} onStarted={() => setStage('game')} onLeft={leaveToEntry} />
+    return (
+      <LobbyScreen
+        session={session}
+        onStarted={() => {
+          setFreshStart(true)
+          setStage('game')
+        }}
+        onLeft={leaveToEntry}
+      />
+    )
   }
   if (stage === 'game') {
-    return <GameScreen session={session} onLeave={() => leaveToEntry(null)} onFatalClose={handleFatalClose} />
+    return (
+      <GameScreen
+        session={session}
+        dealOnEntry={freshStart}
+        onLeave={() => leaveToEntry(null)}
+        onFatalClose={handleFatalClose}
+      />
+    )
   }
   return <EntryScreen onEnterRoom={enterRoom} notice={notice} />
 }

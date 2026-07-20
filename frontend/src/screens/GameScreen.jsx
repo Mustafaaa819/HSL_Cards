@@ -16,13 +16,44 @@ const FLIGHT_CLEANUP_MS = 450
 const BURN_CLEANUP_MS = 750
 const FORCED_FLASH_MS = 900
 
+// One-time dealing animation (fresh match start only). One ghost launches
+// per step; land fires when the flight visually arrives (transform
+// transition is 0.3s in App.css), cleanup removes the faded ghost.
+const DEAL_STEP_MS = 90
+const DEAL_LAND_MS = 260
+const DEAL_CLEANUP_MS = 450
+
+// Seat ellipse, in % of the .round-table box. RX < RY because seats are
+// wider than they are tall — this keeps side seats off the center hub
+// while top/bottom seats clear the table edges.
+const SEAT_RX = 34
+const SEAT_RY = 38
+
+// k = 0 is the bottom of the table (your own anchor); increasing k walks
+// CLOCKWISE on screen, matching direction === 1 walking the players array
+// forward. Screen y grows downward, so cos/sin of an increasing angle
+// traces right → bottom → left, which IS clockwise.
+const seatAngle = (k, count) => Math.PI / 2 + (2 * Math.PI * k) / count
+const seatPos = (k, count) => {
+  const a = seatAngle(k, count)
+  return {
+    left: `${50 + SEAT_RX * Math.cos(a)}%`,
+    top: `${50 + SEAT_RY * Math.sin(a)}%`,
+  }
+}
+
+const DEAL_CARD_DIMS = { xs: { w: 24, h: 34 }, sm: { w: 42, h: 58 }, md: { w: 52, h: 74 } }
+
+// Most cards in one fan row before the hand wraps to a second row.
+const HAND_ROW_MAX = 6
+
 const rectOf = (el) => {
   if (!el) return null
   const { x, y, width, height } = el.getBoundingClientRect()
   return { x, y, w: width, h: height }
 }
 
-export default function GameScreen({ session, onLeave, onFatalClose }) {
+export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose }) {
   // { message, code, card } — see docs/WS_PROTOCOL.md.
   const [error, setError] = useState(null)
   const [lastEvent, setLastEvent] = useState(null)
@@ -45,11 +76,34 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   const [forcedFlash, setForcedFlash] = useState(null)
   const discardRef = useRef(null)
   const blindRowRef = useRef(null)
+  const faceUpRowRef = useRef(null)
   const youAreaRef = useRef(null)
   const seatRefs = useRef({})
   const pendingTapRef = useRef(null) // { spec, rect } of the card just tapped
   const burnTimer = useRef(null)
   const flashTimer = useRef(null)
+
+  // One-time dealing animation. `dealOnEntry` is read once at mount: it is
+  // only true on the lobby's "match just started" path, never on a
+  // reload/reconnect. While `dealing`, seat stacks and your own rows render
+  // clamped to how many cards have visually landed so far; the real state
+  // underneath never changes.
+  const [dealing, setDealing] = useState(() => Boolean(dealOnEntry))
+  const dealingRef = useRef(dealing)
+  const [dealGhosts, setDealGhosts] = useState([])
+  const [dealLanded, setDealLanded] = useState(0)
+  const dealScript = useRef(null)
+  const dealLaunched = useRef(0)
+  const dealTimer = useRef(null)
+  const deckRef = useRef(null)
+  const handRowRef = useRef(null)
+
+  const endDeal = () => {
+    clearInterval(dealTimer.current)
+    dealingRef.current = false
+    setDealing(false)
+    setDealGhosts([])
+  }
 
   const runMotion = (event, state) => {
     const to = rectOf(discardRef.current)
@@ -100,6 +154,11 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
       toastTimer.current = setTimeout(() => setError(null), 4000)
     },
     onEvent: (event, state) => {
+      // A real move landed while the dealing animation was still running
+      // (an eager player acted fast). The animation is pure decoration over
+      // already-final state, so cancel it and snap to reality — nothing is
+      // lost, and the event's own motion below plays normally.
+      if (dealingRef.current) endDeal()
       setLastEvent(event)
       // The table moved, so any complaint about the old state is stale —
       // drop it rather than leave a card marked against a pile it no
@@ -116,9 +175,97 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
       clearTimeout(toastTimer.current)
       clearTimeout(burnTimer.current)
       clearTimeout(flashTimer.current)
+      clearInterval(dealTimer.current)
     },
     []
   )
+
+  // Build the deal script off the first snapshot (all counts/cards are
+  // already final — the server dealt everything in one shot at start), then
+  // launch one ghost per DEAL_STEP_MS. Round-robin: each layer, three
+  // rounds, one card per seat per round — the classic hand-deal order.
+  // Restartable by design (launch index lives in a ref, cleanup only stops
+  // the timer), so StrictMode remounts and mid-deal snapshots just resume.
+  useEffect(() => {
+    if (!dealing || !gameState) return undefined
+    if (!dealScript.current) {
+      const yourId = gameState.you.player_id
+      const script = []
+      for (const layer of ['blind', 'face_up', 'hand']) {
+        for (let round = 0; round < 3; round++) {
+          for (const p of gameState.players) {
+            if (layer === 'blind' && round < p.blind_count) {
+              script.push({ pid: p.player_id, layer, spec: null, seed: `${p.player_id}:${round}` })
+            } else if (layer === 'face_up' && round < p.face_up.length) {
+              script.push({ pid: p.player_id, layer, spec: p.face_up[round] })
+            } else if (layer === 'hand' && round < Math.min(p.hand_count, 3)) {
+              // Only your own hand flies face-up — it's the only hand you
+              // can see. gameState.you.hand is unsorted here on purpose:
+              // this is the "as dealt" order the ghosts should follow.
+              script.push({
+                pid: p.player_id,
+                layer,
+                spec: p.player_id === yourId ? gameState.you.hand[round] : null,
+              })
+            }
+          }
+        }
+      }
+      dealScript.current = script
+    }
+
+    const yourId = gameState.you.player_id
+    dealTimer.current = setInterval(() => {
+      const script = dealScript.current
+      if (dealLaunched.current >= script.length) {
+        clearInterval(dealTimer.current)
+        return
+      }
+      const entry = script[dealLaunched.current]
+      dealLaunched.current += 1
+
+      const toYou = entry.pid === yourId
+      // Your ring seat no longer exists — your dealt cards land straight in
+      // the matching you-area row; opponents' land on their seat marker.
+      const yourRowFor = { blind: blindRowRef, face_up: faceUpRowRef, hand: handRowRef }
+      const size = !toYou ? 'xs' : entry.layer === 'hand' ? 'md' : 'sm'
+      const from = rectOf(deckRef.current)
+      const target = toYou
+        ? rectOf(yourRowFor[entry.layer].current)
+        : rectOf(seatRefs.current[entry.pid])
+      if (!from || !target) {
+        // Can't animate this one (seat not measurable) — count it landed so
+        // the sequence still completes.
+        setDealLanded((n) => n + 1)
+        return
+      }
+      const dims = DEAL_CARD_DIMS[size]
+      // Land a card-sized box centered on the target zone.
+      const to = {
+        x: target.x + target.w / 2 - dims.w / 2,
+        y: target.y + target.h / 2 - dims.h / 2,
+        w: dims.w,
+        h: dims.h,
+      }
+      setDealGhosts((cur) => [
+        ...cur,
+        { id: dealLaunched.current, ...entry, size, from, to },
+      ])
+    }, DEAL_STEP_MS)
+
+    return () => clearInterval(dealTimer.current)
+  }, [dealing, gameState])
+
+  // Every scripted card has visually landed — hold a beat, then hand the
+  // table back to plain live-state rendering (a no-op visually: the clamped
+  // counts already equal the real ones at this point).
+  useEffect(() => {
+    if (!dealing || !dealScript.current) return undefined
+    if (dealLanded < dealScript.current.length) return undefined
+    const timer = setTimeout(endDeal, 250)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- endDeal is stable in effect
+  }, [dealing, dealLanded])
 
   // A snapshot can reshape the rows mid-selection (AFK-forced pickup, a
   // reclaim from another tab). Selection ids are positional within the
@@ -150,7 +297,54 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
   const nameById = Object.fromEntries(gameState.players.map((p) => [p.player_id, p.name]))
   const myTurn = gameState.current_player_id === you.player_id
   const currentName = nameById[gameState.current_player_id]
-  const opponents = gameState.players.filter((p) => p.player_id !== you.player_id)
+  const seatCount = gameState.players.length
+  const myIdx = gameState.players.findIndex((p) => p.player_id === you.player_id)
+  // Ring seats are opponents only — your own status lives in the you-area
+  // panel, so drawing you on the ring said the same thing twice. Order
+  // starts with the player after you; ring slot 0 (bottom-center) stays
+  // reserved as your implied anchor, so opponent angles and the direction
+  // ring keep the exact same geometry as when your seat was drawn there.
+  const opponents = [
+    ...gameState.players.slice(myIdx + 1),
+    ...gameState.players.slice(0, myIdx),
+  ]
+
+  // While dealing, everything renders clamped to how many cards have
+  // visually landed per seat and layer. Cheap to recompute per frame — the
+  // script is at most 45 entries.
+  let dealShown = null
+  if (dealing) {
+    dealShown = Object.fromEntries(
+      gameState.players.map((p) => [p.player_id, { blind: 0, face_up: 0, hand: 0 }])
+    )
+    dealScript.current?.slice(0, dealLanded).forEach((e) => {
+      dealShown[e.pid][e.layer] += 1
+    })
+  }
+  const youShown = dealShown?.[you.player_id]
+  const youBlindCount = youShown ? Math.min(you.blind_count, youShown.blind) : you.blind_count
+  const youFaceUp = youShown ? you.face_up.slice(0, youShown.face_up) : you.face_up
+  // Dealt order while dealing (ghosts land left to right as they fly in),
+  // sorted the moment the deal settles.
+  const youHand = youShown ? you.hand.slice(0, youShown.hand) : sortHand(you.hand)
+
+  // A picked-up pile can easily put 9+ cards in hand. Rather than let one
+  // fan run off the side into a horizontal scroll, split it into stacked
+  // rows so the whole hand is visible at once. HAND_ROW_MAX is fixed
+  // rather than measured: at 390px the row has ~350px of usable width and
+  // a card--md fan steps 36px per card after the first 52px, so 6 fits
+  // with room to spare for the arc's tilt. Rows are then evened out
+  // (9 renders 5+4, not 6+3) so neither row looks like a leftover.
+  const handRows = []
+  if (youHand.length > 0) {
+    const rowCount = Math.ceil(youHand.length / HAND_ROW_MAX)
+    const perRow = Math.ceil(youHand.length / rowCount)
+    for (let start = 0; start < youHand.length; start += perRow) {
+      handRows.push(
+        youHand.slice(start, start + perRow).map((spec, k) => ({ spec, i: start + k }))
+      )
+    }
+  }
 
   // Only an illegal_move names a card. A duplicate rank+suit (two-deck
   // games) marks both copies — they're the same card, both equally refused.
@@ -222,18 +416,6 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         </span>
       </header>
 
-      <section className="opponents" aria-label="Opponents">
-        {opponents.map((opponent, i) => (
-          <OpponentSeat
-            key={opponent.player_id}
-            player={opponent}
-            isCurrent={opponent.player_id === gameState.current_player_id}
-            flashForced={forcedFlash?.playerId === opponent.player_id}
-            arcOffset={Math.abs(i - (opponents.length - 1) / 2) * 7}
-            seatRef={(el) => (seatRefs.current[opponent.player_id] = el)}
-          />
-        ))}
-      </section>
 
       {/* Keys make React remount the banner when whose-turn (not just its
           styling) changes, which retriggers the banner-in entrance. Styling
@@ -285,17 +467,38 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
         </p>
       )}
 
-      <section className="table-center">
-        <div className="draw-deck">
-          {gameState.draw_deck_count > 0 ? (
-            <Card hidden size="sm" label={`Draw deck, ${gameState.draw_deck_count} cards`} />
-          ) : (
-            <div className="card card--sm card--slot" aria-hidden="true" />
-          )}
-          <span className="zone-caption">deck · {gameState.draw_deck_count}</span>
-        </div>
+      <section
+        className={seatCount <= 3 ? 'round-table round-table--few' : 'round-table'}
+        aria-label="Table"
+      >
+        <DirectionRing count={seatCount} direction={gameState.direction} />
 
-        <DiscardPile pile={gameState.discard_pile} stackRef={discardRef} burning={burn != null} />
+        {opponents.map((player, j) => (
+          <TableSeat
+            key={player.player_id}
+            player={player}
+            isCurrent={player.player_id === gameState.current_player_id}
+            flashForced={forcedFlash?.playerId === player.player_id}
+            style={seatPos(j + 1, seatCount)}
+            shown={dealShown?.[player.player_id]}
+            seatRef={(el) => (seatRefs.current[player.player_id] = el)}
+          />
+        ))}
+
+        <div className="table-hub">
+          <div className="draw-deck">
+            <div ref={deckRef}>
+              {gameState.draw_deck_count > 0 ? (
+                <Card hidden size="sm" label={`Draw deck, ${gameState.draw_deck_count} cards`} />
+              ) : (
+                <div className="card card--sm card--slot" aria-hidden="true" />
+              )}
+            </div>
+            <span className="zone-caption">deck · {gameState.draw_deck_count}</span>
+          </div>
+
+          <DiscardPile pile={gameState.discard_pile} stackRef={discardRef} burning={burn != null} />
+        </div>
       </section>
 
       <p
@@ -307,9 +510,13 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
 
       <section
         ref={youAreaRef}
-        className={
-          forcedFlash?.playerId === you.player_id ? 'you-area you-area--forced' : 'you-area'
-        }
+        className={[
+          'you-area',
+          myTurn && !gameState.game_over ? 'you-area--turn' : '',
+          forcedFlash?.playerId === you.player_id ? 'you-area--forced' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
         aria-label="Your cards"
       >
         <div className="you-row you-row--blind">
@@ -323,7 +530,7 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
             blind{you.active_layer === 'blind' && !you.finish_position ? ' — tap to flip!' : ''}
           </span>
           <div className="row-cards" ref={blindRowRef}>
-            {Array.from({ length: you.blind_count }, (_, i) => (
+            {Array.from({ length: youBlindCount }, (_, i) => (
               <Card
                 key={i}
                 hidden
@@ -334,7 +541,7 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 label={`Blind card ${i + 1}`}
               />
             ))}
-            {you.blind_count === 0 && <span className="row-empty">cleared</span>}
+            {youBlindCount === 0 && !dealing && <span className="row-empty">cleared</span>}
           </div>
         </div>
 
@@ -346,8 +553,8 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
           >
             face-up{you.active_layer === 'face_up' ? ' — in play' : ''}
           </span>
-          <div className="row-cards">
-            {you.face_up.map((spec, i) => {
+          <div className="row-cards" ref={faceUpRowRef}>
+            {youFaceUp.map((spec, i) => {
               const id = `faceup-${spec}-${i}`
               const rankMismatch =
                 multiSelectMode && selectionRank != null && parseCard(spec).rank !== selectionRank
@@ -363,13 +570,13 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
                 />
               )
             })}
-            {you.face_up.length === 0 && <span className="row-empty">cleared</span>}
+            {youFaceUp.length === 0 && !dealing && <span className="row-empty">cleared</span>}
           </div>
         </div>
 
         <div className="you-row you-row--hand">
           <div className="hand-header">
-            <span className="row-caption">hand · {you.hand.length}</span>
+            <span className="row-caption">hand · {youHand.length}</span>
             <div className="hand-actions">
               {multiSelectMode ? (
                 <>
@@ -411,24 +618,58 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
               </button>
             </div>
           </div>
-          <div className="row-cards row-cards--hand">
-            {sortHand(you.hand).map((spec, i) => {
-              const id = `hand-${spec}-${i}`
-              const rankMismatch =
-                multiSelectMode && selectionRank != null && parseCard(spec).rank !== selectionRank
-              return (
-                <Card
-                  key={`${spec}-${i}`}
-                  spec={spec}
-                  size="md"
-                  dimmed={you.active_layer !== 'hand' || !myTurn || rankMismatch}
-                  selected={selectedIds.has(id)}
-                  rejected={spec === rejectedCard}
-                  onClick={(e) => tapCard(id, spec, e.currentTarget)}
-                />
-              )
-            })}
-            {you.hand.length === 0 && <span className="row-empty">empty</span>}
+          <div className="row-cards row-cards--hand" ref={handRowRef}>
+            {handRows.map((row, r) => (
+              <div className="hand-fan" key={`fan-${r}`}>
+                {row.map(({ spec, i }, j) => {
+                  // `i` is the card's index in the whole hand, not in this
+                  // row — identity (and therefore selection) must not shift
+                  // when a card lands in a different row.
+                  const id = `hand-${spec}-${i}`
+                  const rankMismatch =
+                    multiSelectMode &&
+                    selectionRank != null &&
+                    parseCard(spec).rank !== selectionRank
+                  const isSelected = selectedIds.has(id)
+                  const isRejected = spec === rejectedCard
+                  // Fan geometry, reset per row: each row is its own small
+                  // self-contained arc centred on itself, rather than one
+                  // long arc sliced in half. Rotation is linear across the
+                  // row (edges capped at ±15°) with a shallow lift — edge
+                  // cards drop with their tilt. Wrappers carry these so the
+                  // Card's own transform states (selected lift, rejected
+                  // shake, press) compose instead of clash.
+                  const mid = (row.length - 1) / 2
+                  const rot = (j - mid) * Math.min(6, 30 / Math.max(row.length - 1, 1))
+                  return (
+                    <span
+                      key={`${spec}-${i}`}
+                      className={
+                        isSelected || isRejected ? 'fan-card fan-card--raised' : 'fan-card'
+                      }
+                      // Left-to-right stacking within the row: each card
+                      // overlaps the one before it, so a card's exposed
+                      // left sliver is always its own tap target.
+                      style={{
+                        '--fan-rot': `${rot.toFixed(1)}deg`,
+                        '--fan-lift': `${Math.abs(rot * 0.6).toFixed(1)}px`,
+                        zIndex: j + 1,
+                      }}
+                    >
+                      <Card
+                        spec={spec}
+                        size="md"
+                        dimmed={you.active_layer !== 'hand' || !myTurn || rankMismatch}
+                        selected={isSelected}
+                        rejected={isRejected}
+                        onClick={(e) => tapCard(id, spec, e.currentTarget)}
+                      />
+                    </span>
+                  )
+                })}
+              </div>
+            ))}
+            {youHand.length === 0 && !dealing && <span className="row-empty">empty</span>}
           </div>
         </div>
       </section>
@@ -438,6 +679,15 @@ export default function GameScreen({ session, onLeave, onFatalClose }) {
           key={flight.id}
           flight={flight}
           onDone={() => setFlights((cur) => cur.filter((f) => f.id !== flight.id))}
+        />
+      ))}
+
+      {dealGhosts.map((ghost) => (
+        <DealFlight
+          key={ghost.id}
+          ghost={ghost}
+          onLand={() => setDealLanded((n) => n + 1)}
+          onDone={() => setDealGhosts((cur) => cur.filter((g) => g.id !== ghost.id))}
         />
       ))}
 
@@ -516,33 +766,135 @@ function ConnectionBanner({ status, onReclaim }) {
   )
 }
 
-function OpponentSeat({ player, isCurrent, flashForced, arcOffset, seatRef }) {
+// One opponent seat on the circular table: a light marker on the felt —
+// avatar, name, compact blind+face-up stack. Hands never appear here as
+// cards, only as a count. Your own seat is never drawn; the you-area below
+// is your seat. `shown` (while the deal animation runs) clamps each layer
+// to how many cards have visually landed.
+function TableSeat({ player, isCurrent, flashForced, style, shown, seatRef }) {
   const finished = player.finish_position != null
-  const classes = ['opponent']
-  if (isCurrent) classes.push('opponent--current')
-  if (flashForced) classes.push('opponent--forced')
+  const classes = ['seat']
+  if (isCurrent) classes.push('seat--current')
+  if (flashForced) classes.push('seat--forced')
+
+  const blindCount = shown ? Math.min(player.blind_count, shown.blind) : player.blind_count
+  const faceUp = shown ? player.face_up.slice(0, shown.face_up) : player.face_up
+  const handCount = shown ? Math.min(player.hand_count, shown.hand) : player.hand_count
+  const columns = Math.max(blindCount, faceUp.length)
+
   return (
-    <div
-      ref={seatRef}
-      className={classes.join(' ')}
-      style={{ transform: `translateY(${arcOffset}px)` }}
-    >
-      <span className="avatar" aria-hidden="true">{player.name.charAt(0).toUpperCase()}</span>
-      <span className="opponent-name">{player.name}</span>
+    <div ref={seatRef} className={classes.join(' ')} style={style}>
+      <span className="seat-id">
+        <span className="avatar avatar--seat" aria-hidden="true">
+          {player.name.charAt(0).toUpperCase()}
+        </span>
+        <span className="seat-name">{player.name}</span>
+      </span>
       {finished ? (
-        <span className="opponent-finished">{ordinal(player.finish_position)}</span>
+        <span className="seat-finished">{ordinal(player.finish_position)}</span>
       ) : (
         <>
-          <span className="opponent-counts">
-            <span title="cards in hand">✋{player.hand_count}</span>
-            <span title="blind cards">🂠{player.blind_count}</span>
-          </span>
-          <span className="opponent-faceup">
-            {player.face_up.map((spec, i) => (
-              <Card key={`${spec}-${i}`} spec={spec} size="xs" />
+          <span className="seat-stack" aria-hidden="true">
+            {Array.from({ length: columns }, (_, i) => (
+              <span key={i} className="stack-col">
+                {i < blindCount && (
+                  <span className="stack-blind">
+                    <Card hidden patternSeed={`${player.player_id}:${i}`} size="xs" />
+                  </span>
+                )}
+                {i < faceUp.length && (
+                  <span className="stack-faceup">
+                    <Card spec={faceUp[i]} size="xs" />
+                  </span>
+                )}
+              </span>
             ))}
           </span>
+          <span className="seat-hand" title="cards in hand">✋{handCount}</span>
         </>
+      )}
+    </div>
+  )
+}
+
+// Chevrons at the midpoints between seats, pointing along the current flow
+// of play and pulsing in flow order — a J's reverse visibly flips the whole
+// ring, not just the header icon. Keyed by direction so the marching
+// animation restarts cleanly on a flip.
+function DirectionRing({ count, direction }) {
+  const chevrons = Array.from({ length: count }, (_, k) => {
+    const a = seatAngle(k + 0.5, count)
+    // Tangent to the ellipse: +90° points clockwise (the direction === 1
+    // flow, matching seat order on screen), -90° counterclockwise.
+    const deg = (a * 180) / Math.PI + (direction === 1 ? 90 : -90)
+    const flowIndex = direction === 1 ? k : count - 1 - k
+    return (
+      <span
+        key={`${direction}-${k}`}
+        className="ring-chevron"
+        style={{
+          left: `${50 + SEAT_RX * Math.cos(a)}%`,
+          top: `${50 + SEAT_RY * Math.sin(a)}%`,
+          transform: `translate(-50%, -50%) rotate(${deg}deg)`,
+          animationDelay: `${((flowIndex / count) * 1.8).toFixed(2)}s`,
+        }}
+      >
+        ❯
+      </span>
+    )
+  })
+  return (
+    <div className="direction-ring" aria-hidden="true">
+      {chevrons}
+    </div>
+  )
+}
+
+// One dealt card flying from the center deck to its seat (or to your hand
+// row). Same anchored-at-destination transform trick as FlightCard, but
+// with a separate onLand beat: the moment the ghost visually arrives, the
+// real card pops in underneath and the ghost fades over it.
+function DealFlight({ ghost, onLand, onDone }) {
+  const [arrived, setArrived] = useState(false)
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setArrived(true)))
+    const landTimer = setTimeout(onLand, DEAL_LAND_MS)
+    const doneTimer = setTimeout(onDone, DEAL_CLEANUP_MS)
+    return () => {
+      cancelAnimationFrame(raf)
+      clearTimeout(landTimer)
+      clearTimeout(doneTimer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once per ghost
+  }, [])
+
+  const { from, to } = ghost
+  const dx = from.x + from.w / 2 - (to.x + to.w / 2)
+  const dy = from.y + from.h / 2 - (to.y + to.h / 2)
+  const startScale = Math.max(from.h / to.h, 0.2)
+
+  return (
+    <div
+      className="deal-flight"
+      style={{
+        left: to.x,
+        top: to.y,
+        width: to.w,
+        height: to.h,
+        transform: arrived
+          ? 'translate(0px, 0px) scale(1)'
+          : `translate(${dx}px, ${dy}px) scale(${startScale})`,
+        opacity: arrived ? 0 : 1,
+      }}
+      aria-hidden="true"
+    >
+      {ghost.layer === 'blind' ? (
+        <Card hidden patternSeed={ghost.seed} size={ghost.size} />
+      ) : ghost.spec ? (
+        <Card spec={ghost.spec} size={ghost.size} />
+      ) : (
+        <Card hidden size={ghost.size} />
       )}
     </div>
   )

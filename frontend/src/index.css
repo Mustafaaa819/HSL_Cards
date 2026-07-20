@@ -1,18 +1,34 @@
 /* Design tokens from CLAUDE.md's design system. Dark table, always. */
 :root {
-  --bg: #14181a;
-  --surface: #1c2225;
-  --surface-raised: #232b2e;
-  --border: #2e383b;
+  /* Nudged up a step from the original near-black room (#14181a and
+     friends): still unmistakably a dark theme, just less like playing in
+     an unlit room. --card-face deliberately did NOT move with them — it
+     now sits a touch darker than --surface, which keeps the white/red SVG
+     ink at full contrast and gives cards their own edge against panels. */
+  --bg: #1b2124;
+  --surface: #242b2f;
+  --surface-raised: #2c3538;
+  --border: #3a4548;
   --text: #ede7dc;
   --muted: #8b968f;
   --gold: #c9a15a; /* reserved for power cards + turn emphasis */
   --danger: #c1443b;
   --safe: #3e8e82;
-  --card-face: #f3eee3;
-  --card-red: #b3352c;
-  --card-black: #22262a;
+  /* Emerald card-table felt — the game table's surface; the page's light
+     pool mixes a hint of it so every screen reads as one dark card room. */
+  --felt: #1e4534;
+  /* The SVG faces are transparent-bodied white/red ink (assets/cards/
+     NOTICE.md), so --card-face is the dark card body they sit on, and the
+     two ink tokens match the art's own inks exactly — the typographic xs
+     minis have to read as cards from the same deck. ("black" suits print
+     white on this deck, the way the art's black ink was inverted.) */
+  --card-face: #1d2427;
+  --card-red: #d40000;
+  --card-black: #ffffff;
   --card-back: #1f3230;
+
+  /* Card ranks only — the interface itself stays in the system font. */
+  --font-display: 'Oswald', 'Arial Narrow', 'Segoe UI', sans-serif;
 
   font: 16px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
   color-scheme: dark;
@@ -26,9 +42,22 @@
   box-sizing: border-box;
 }
 
+/* The room around the table: a soft overhead-light pool tinted with the
+   felt green, fading out at the edges — richer than the old flat
+   near-black, still unmistakably a dark room. The felt tint now carries
+   further down the gradient and the edge stop no longer crushes toward
+   black, so the room reads a bit brighter overall. */
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100svh;
+  background:
+    radial-gradient(
+        130% 90% at 50% 16%,
+        color-mix(in srgb, var(--felt) 34%, var(--bg)) 0%,
+        color-mix(in srgb, var(--felt) 16%, var(--bg)) 62%,
+        color-mix(in srgb, var(--bg) 90%, black) 100%
+      )
+      var(--bg);
 }
 
 #root {

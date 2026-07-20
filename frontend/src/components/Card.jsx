@@ -2,6 +2,22 @@ import { useMemo } from 'react'
 import { parseCard } from '../cards.js'
 import { generateBackPattern } from '../cardback.js'
 
+// The 52 real card faces (dark-theme recolor, provenance in
+// assets/cards/NOTICE.md), keyed by wire spec: "10H", "AS", "JC"…
+// Eager URL imports so the whole deck ships through Vite's hashed
+// asset pipeline instead of being fetched lazily mid-game.
+const faceModules = import.meta.glob('../assets/cards/*.svg', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+})
+const faceArt = Object.fromEntries(
+  Object.entries(faceModules).map(([path, url]) => [
+    path.slice(path.lastIndexOf('/') + 1, -'.svg'.length),
+    url,
+  ])
+)
+
 // The ONE component every card in the UI renders through. A later phase swaps
 // the placeholder face (rank + suit text) for real SVG card assets here, and
 // nowhere else. `hidden` renders a card back (blind cards, opponents' hands).
@@ -63,8 +79,17 @@ export default function Card({
       onClick={onClick}
       aria-label={label ?? `${rank}${symbol}`}
     >
-      <span className="card-rank">{rank}</span>
-      <span className="card-suit" aria-hidden="true">{symbol}</span>
+      {size === 'xs' ? (
+        // 24×34px can't resolve the full art — face-card line work turns to
+        // noise at that size — so the minis stay typographic, printed in the
+        // same ink colors as the art (--card-red / --card-black).
+        <>
+          <span className="card-rank">{rank}</span>
+          <span className="card-suit" aria-hidden="true">{symbol}</span>
+        </>
+      ) : (
+        <img src={faceArt[spec]} alt="" className="card-face-art" draggable={false} />
+      )}
     </Tag>
   )
 }
