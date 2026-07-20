@@ -14,6 +14,10 @@
   --gold: #c9a15a; /* reserved for power cards + turn emphasis */
   --danger: #c1443b;
   --safe: #3e8e82;
+  /* Only blue on the table: the 2's reset pulse. Nothing else is blue on
+     purpose — the pulse has to read as "pile cleared, keep going", not as
+     any of the states --gold/--danger/--safe already own. */
+  --reset-blue: #4a86c9;
   /* Emerald card-table felt — the game table's surface; the page's light
      pool mixes a hint of it so every screen reads as one dark card room. */
   --felt: #1e4534;

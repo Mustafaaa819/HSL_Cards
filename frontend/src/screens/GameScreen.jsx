@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
+// The "light" ESM build: SVG renderer only, and — the reason it's worth
+// naming explicitly — no expression evaluator, so no `eval` in the bundle.
+// fire.json uses neither, and the full player costs ~250kB more.
+import lottie from 'lottie-web/build/player/esm/lottie_light.min.js'
 import Card from '../components/Card.jsx'
 import { useGameSocket } from '../hooks/useGameSocket.js'
 import { parseCard, prettyCard, sortHand } from '../cards.js'
+import fireAnimation from '../assets/animations/fire.json'
 
 // Once a turn has been stalled this long, everyone gets told who the table
 // is waiting on — otherwise the eventual forced pickup/flip/skip looks like
@@ -13,8 +18,27 @@ const URGENT_SECONDS = 10
 // transient DOM for each effect sticks around. Generous on purpose — removal
 // a beat late is invisible, removal a beat early truncates the animation.
 const FLIGHT_CLEANUP_MS = 450
-const BURN_CLEANUP_MS = 750
+// fire.json is 30 frames at 30fps — exactly 1s of flame — and the burned
+// card's pop tail runs the ~160ms after that. Paired with the 1.16s
+// `burn-away` animation in App.css; move one and move the other.
+const FIRE_MS = 1000
+const BURN_CLEANUP_MS = FIRE_MS + 160
 const FORCED_FLASH_MS = 900
+
+// 2 / 7 / J pile reactions. The ring and glyph animations are under a
+// second; the 7's badge deliberately outlives its ripple so the rank
+// ceiling is still readable while the next player decides.
+const POWER_FX_MS = 950
+const SEVEN_BADGE_MS = 3200
+
+// The fire is drawn into a square this many times the pile card's height —
+// the flames need room to lick past the card's edges instead of being
+// clipped to it. FIRE_BASE is where the flame's root sits inside fire.json's
+// own 500×500 frame (its layers are anchored at y≈460), so the box is hung
+// from that point rather than centred: the fire then rises FROM the card
+// instead of straddling it with half the flame below the table.
+const FIRE_SCALE = 2.2
+const FIRE_BASE = 0.92
 
 // One-time dealing animation (fresh match start only). One ghost launches
 // per step; land fires when the flight visually arrives (transform
@@ -74,6 +98,11 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   const [flights, setFlights] = useState([])
   const [burn, setBurn] = useState(null)
   const [forcedFlash, setForcedFlash] = useState(null)
+  // { rank, id } for the 2/7/J beats — one at a time, since only one card
+  // can be the newly played top card. The 7's "≤7" badge is separate state
+  // because it outlives the ripple that introduces it.
+  const [powerFx, setPowerFx] = useState(null)
+  const [ruleBadge, setRuleBadge] = useState(null)
   const discardRef = useRef(null)
   const blindRowRef = useRef(null)
   const faceUpRowRef = useRef(null)
@@ -82,6 +111,8 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   const pendingTapRef = useRef(null) // { spec, rect } of the card just tapped
   const burnTimer = useRef(null)
   const flashTimer = useRef(null)
+  const powerFxTimer = useRef(null)
+  const ruleBadgeTimer = useRef(null)
 
   // One-time dealing animation. `dealOnEntry` is read once at mount: it is
   // only true on the lobby's "match just started" path, never on a
@@ -112,8 +143,9 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
 
     if ((event.kind === 'play' || event.kind === 'flip') && event.pile_burned) {
       // A nuke gets its own bigger beat instead of the normal flight: the 10
-      // pops onto the pile and torches it. Timestamp key so back-to-back
-      // burns (rare, but legal) each restart the animation.
+      // lands on the pile, real fire burns over it, and the card pops out as
+      // the flames finish. Timestamp key so back-to-back burns (rare, but
+      // legal) each remount the ghost and restart the fire.
       setBurn({ id: Date.now(), spec: event.card, rect: to })
       clearTimeout(burnTimer.current)
       burnTimer.current = setTimeout(() => setBurn(null), BURN_CLEANUP_MS)
@@ -139,6 +171,26 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
       }
     }
     pendingTapRef.current = null
+
+    // 2 / 7 / J each get a beat on the table itself, on top of (not instead
+    // of) the normal flight — the card still visibly travels to the pile
+    // while the pile, badge, or direction ring reacts to what it did. Flips
+    // count too: a blind-flipped J reverses the table just as hard as a
+    // played one. The 10 is handled by the burn branch above.
+    const played = event.kind === 'play' || (event.kind === 'flip' && event.played)
+    if (played && !event.pile_burned) {
+      const { rank } = parseCard(event.card)
+      if (rank === '2' || rank === '7' || rank === 'J') {
+        setPowerFx({ rank, id: Date.now() })
+        clearTimeout(powerFxTimer.current)
+        powerFxTimer.current = setTimeout(() => setPowerFx(null), POWER_FX_MS)
+      }
+      if (rank === '7') {
+        setRuleBadge({ id: Date.now(), text: '≤ 7' })
+        clearTimeout(ruleBadgeTimer.current)
+        ruleBadgeTimer.current = setTimeout(() => setRuleBadge(null), SEVEN_BADGE_MS)
+      }
+    }
 
     if (event.forced) {
       setForcedFlash({ playerId: event.player_id })
@@ -175,6 +227,8 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
       clearTimeout(toastTimer.current)
       clearTimeout(burnTimer.current)
       clearTimeout(flashTimer.current)
+      clearTimeout(powerFxTimer.current)
+      clearTimeout(ruleBadgeTimer.current)
       clearInterval(dealTimer.current)
     },
     []
@@ -471,7 +525,19 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
         className={seatCount <= 3 ? 'round-table round-table--few' : 'round-table'}
         aria-label="Table"
       >
-        <DirectionRing count={seatCount} direction={gameState.direction} />
+        <DirectionRing
+          count={seatCount}
+          direction={gameState.direction}
+          flash={powerFx?.rank === 'J'}
+        />
+
+        {/* Keyed on the fx id so a second J while the first is still fading
+            restarts the glyph instead of leaving it mid-flight. */}
+        {powerFx?.rank === 'J' && (
+          <div className="reverse-flash" key={powerFx.id} aria-hidden="true">
+            {gameState.direction === 1 ? '⟳' : '⟲'}
+          </div>
+        )}
 
         {opponents.map((player, j) => (
           <TableSeat
@@ -497,7 +563,13 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
             <span className="zone-caption">deck · {gameState.draw_deck_count}</span>
           </div>
 
-          <DiscardPile pile={gameState.discard_pile} stackRef={discardRef} burning={burn != null} />
+          <DiscardPile
+            pile={gameState.discard_pile}
+            stackRef={discardRef}
+            burning={burn != null}
+            fx={powerFx?.rank === 'J' ? null : powerFx}
+            ruleBadge={ruleBadge}
+          />
         </div>
       </section>
 
@@ -692,13 +764,20 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
       ))}
 
       {burn && (
-        <div
-          className="burn-ghost"
-          style={{ left: burn.rect.x, top: burn.rect.y, width: burn.rect.w, height: burn.rect.h }}
-          aria-hidden="true"
-        >
-          <Card spec={burn.spec} size="lg" />
-        </div>
+        <>
+          <div
+            className="burn-ghost"
+            key={`ghost-${burn.id}`}
+            style={{ left: burn.rect.x, top: burn.rect.y, width: burn.rect.w, height: burn.rect.h }}
+            aria-hidden="true"
+          >
+            <Card spec={burn.spec} size="lg" />
+          </div>
+          {/* Keyed on the burn id: a fresh mount per nuke is what guarantees
+              the previous lottie instance was destroyed before this one
+              loads (see BurnFire's cleanup). */}
+          <BurnFire key={`fire-${burn.id}`} rect={burn.rect} />
+        </>
       )}
 
       {error && (
@@ -821,7 +900,7 @@ function TableSeat({ player, isCurrent, flashForced, style, shown, seatRef }) {
 // of play and pulsing in flow order — a J's reverse visibly flips the whole
 // ring, not just the header icon. Keyed by direction so the marching
 // animation restarts cleanly on a flip.
-function DirectionRing({ count, direction }) {
+function DirectionRing({ count, direction, flash }) {
   const chevrons = Array.from({ length: count }, (_, k) => {
     const a = seatAngle(k + 0.5, count)
     // Tangent to the ellipse: +90° points clockwise (the direction === 1
@@ -835,6 +914,9 @@ function DirectionRing({ count, direction }) {
         style={{
           left: `${50 + SEAT_RX * Math.cos(a)}%`,
           top: `${50 + SEAT_RY * Math.sin(a)}%`,
+          // The surge keyframe has to rebuild the whole transform, so the
+          // chevron's own angle lives in a custom property both can read.
+          '--chevron-rot': `${deg}deg`,
           transform: `translate(-50%, -50%) rotate(${deg}deg)`,
           animationDelay: `${((flowIndex / count) * 1.8).toFixed(2)}s`,
         }}
@@ -844,9 +926,49 @@ function DirectionRing({ count, direction }) {
     )
   })
   return (
-    <div className="direction-ring" aria-hidden="true">
+    <div className={flash ? 'direction-ring direction-ring--flash' : 'direction-ring'} aria-hidden="true">
       {chevrons}
     </div>
+  )
+}
+
+// The 10-nuke's fire, played once over the discard pile. lottie-web's
+// imperative API rather than a React wrapper, to match how every other
+// transient effect on this screen is managed (a ref, an effect, explicit
+// teardown). Mounted keyed per burn, so the effect body runs exactly once
+// per nuke and destroy() always pairs with its own loadAnimation().
+function BurnFire({ rect }) {
+  const hostRef = useRef(null)
+
+  useEffect(() => {
+    // display: none would still leave the instance rendering frames every
+    // tick, so reduced-motion has to be answered here, not only in CSS.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return undefined
+    const anim = lottie.loadAnimation({
+      container: hostRef.current,
+      animationData: fireAnimation,
+      renderer: 'svg',
+      loop: false,
+      autoplay: true,
+    })
+    return () => anim.destroy()
+  }, [])
+
+  // Square box, centred on the card horizontally and hung so the flame's
+  // root lands just inside the card's bottom edge.
+  const size = rect.h * FIRE_SCALE
+  return (
+    <div
+      ref={hostRef}
+      className="burn-fire"
+      style={{
+        left: rect.x + rect.w / 2 - size / 2,
+        top: rect.y + rect.h - size * FIRE_BASE,
+        width: size,
+        height: size,
+      }}
+      aria-hidden="true"
+    />
   )
 }
 
@@ -900,7 +1022,7 @@ function DealFlight({ ghost, onLand, onDone }) {
   )
 }
 
-function DiscardPile({ pile, stackRef, burning }) {
+function DiscardPile({ pile, stackRef, burning, fx, ruleBadge }) {
   const topCard = pile.length > 0 ? pile[pile.length - 1] : null
 
   // Consecutive power cards on top of the pile stay visible as a fanned
@@ -914,7 +1036,22 @@ function DiscardPile({ pile, stackRef, burning }) {
 
   return (
     <div className="discard">
+      {/* Keyed so a 7 played while the previous badge is still fading
+          restarts it rather than inheriting the old element's timeline. */}
+      {ruleBadge && (
+        <span className="pile-rule-badge" key={ruleBadge.id}>
+          {ruleBadge.text}
+        </span>
+      )}
       <div className={burning ? 'discard-stack discard-stack--burning' : 'discard-stack'} ref={stackRef}>
+        {/* 2's pulse / 7's ripple. A real keyed element rather than a class
+            on the stack, so a follow-up throw of the same rank remounts and
+            replays it instead of silently reusing a running animation — and
+            so the stack (and the rect the flight animation measures off it)
+            never remounts. */}
+        {fx && (
+          <span className={`pile-fx pile-fx--${fx.rank === '2' ? 'reset' : 'seven'}`} key={fx.id} />
+        )}
         {fanned.map((spec, i) => (
           <div key={`${spec}-${i}`} className="discard-under" style={{ transform: `translateX(${(i - fanned.length) * 14}px) rotate(${(i - fanned.length) * 4}deg)` }}>
             <Card spec={spec} size="sm" />

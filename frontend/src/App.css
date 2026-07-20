@@ -798,6 +798,11 @@ button.card:not(:disabled):active {
   gap: 6px;
 }
 
+/* Anchor for the rule badge, which hangs off the pile's top-right corner. */
+.discard {
+  position: relative;
+}
+
 .discard-stack {
   position: relative;
   display: flex;
@@ -855,36 +860,64 @@ button.card:not(:disabled):active {
   will-change: transform;
 }
 
-/* 10-nuke: the played 10 pops onto the pile, flares, and burns away — a
-   visibly bigger table event than a normal play. Uses danger-red for the
-   flare (a burn is a threat-flavored event), never gold. */
+/* 10-nuke: the played 10 lands on the pile, a real fire animation burns
+   over it (assets/animations/fire.json, played by lottie-web), and the card
+   pops out as the fire finishes. The card no longer fakes fire with color
+   filters — it just holds still under the flames and then goes.
+
+   1.16s = BURN_CLEANUP_MS in GameScreen.jsx = the fire's own 1s (30 frames
+   @ 30fps) plus the ~160ms pop tail. Keep the two in step. */
 .burn-ghost {
   position: fixed;
   z-index: 24;
   pointer-events: none;
-  animation: burn-away 0.6s ease forwards;
+  animation: burn-away 1.16s linear forwards;
 }
 
 @keyframes burn-away {
   0% {
     transform: scale(0.7);
     opacity: 0;
-    filter: none;
   }
-  25% {
+  15% {
     transform: scale(1);
     opacity: 1;
-    filter: none;
   }
-  55% {
-    transform: scale(1.06);
+  /* Holds under the fire until frame 30, then pops in the last 160ms. */
+  86% {
+    transform: scale(1);
     opacity: 1;
-    filter: brightness(1.35) sepia(0.5) hue-rotate(-25deg);
+    animation-timing-function: ease-out;
   }
   100% {
-    transform: scale(1.3);
+    transform: scale(1.35);
     opacity: 0;
-    filter: brightness(1.6) sepia(0.8) hue-rotate(-35deg);
+  }
+}
+
+/* Host box for the lottie-web fire, sized and anchored over the pile in
+   GameScreen.jsx. The instance itself is created and destroyed per nuke.
+
+   The asset is 16 stacked layers of one flat red at 60% opacity — composited
+   normally they just pile up into an opaque red blob that hides the card
+   underneath. Screen blending is what makes it read as fire: overlapping
+   tongues add toward a hot orange-white core while single layers stay deep
+   red, and the burning card shows through the whole thing. */
+.burn-fire {
+  position: fixed;
+  z-index: 26;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  /* fire.json is a flipbook built to loop, so frame 30 is a full-height
+     flame — played once it would cut out mid-blaze. Fade the last ~300ms so
+     it dies down instead, finishing right as the card pops (86% of the
+     1.16s `burn-away` above). */
+  animation: fire-out 0.3s ease-in 0.8s forwards;
+}
+
+@keyframes fire-out {
+  to {
+    opacity: 0;
   }
 }
 
@@ -907,6 +940,151 @@ button.card:not(:disabled):active {
   }
   100% {
     box-shadow: 0 0 30px 10px transparent;
+  }
+}
+
+/* 2 and 7 get the same ring mechanism as the burn, recoloured — the pile
+   itself reacts while the played card flies in normally on top of it. Each
+   rank owns one colour so the effect is identifiable at a glance without
+   reading the event line. */
+
+.pile-fx {
+  position: absolute;
+  inset: -6px;
+  z-index: 3;
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+/* 2 — reset. Blue, and deliberately a double beat rather than one clean
+   flash: a 2 usually forces a bonus throw, so this has to read as "pile
+   cleared, you're not done yet", not as a completion chime. */
+.pile-fx--reset {
+  animation: reset-pulse 0.9s ease-out forwards;
+}
+
+@keyframes reset-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--reset-blue) 70%, transparent);
+  }
+  30% {
+    box-shadow: 0 0 20px 5px color-mix(in srgb, var(--reset-blue) 65%, transparent);
+  }
+  55% {
+    box-shadow: 0 0 6px 1px color-mix(in srgb, var(--reset-blue) 25%, transparent);
+  }
+  80% {
+    box-shadow: 0 0 24px 7px color-mix(in srgb, var(--reset-blue) 60%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 34px 12px transparent;
+  }
+}
+
+/* 7 — under-power. A ripple that expands outward and thins as it goes:
+   the constraint spreading to the next player, not a flash on the pile. */
+.pile-fx--seven {
+  border: 2px solid color-mix(in srgb, var(--safe) 85%, transparent);
+  animation: seven-ripple 0.85s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+
+@keyframes seven-ripple {
+  0% {
+    transform: scale(0.82);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+    border-width: 1px;
+  }
+}
+
+/* The rule the 7 just imposed, stated next to the pile it applies to.
+   Outlives its ripple by a few seconds — this is the one place the current
+   rank ceiling is visible on the table itself. */
+.pile-rule-badge {
+  position: absolute;
+  top: -10px;
+  right: -14px;
+  z-index: 3;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--safe) 60%, var(--text));
+  background: color-mix(in srgb, var(--safe) 22%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--safe) 65%, transparent);
+  box-shadow: 0 4px 10px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+  animation: badge-in 0.25s ease backwards, badge-out 0.5s ease 2.7s forwards;
+}
+
+@keyframes badge-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.85);
+  }
+}
+
+@keyframes badge-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* J — reverse. The big glyph flashes over the table centre while the
+   existing direction ring surges, so the flip registers as one event in two
+   places rather than a silent state change in the header chip. */
+.reverse-flash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /* Clear of the hub (2) and the seats (3) — the flash reads as one beat
+     over the table, never half-hidden behind the pile card. */
+  z-index: 6;
+  transform: translate(-50%, -50%);
+  font-size: 96px;
+  line-height: 1;
+  color: var(--gold);
+  text-shadow: 0 0 24px color-mix(in srgb, var(--gold) 60%, transparent);
+  pointer-events: none;
+  animation: reverse-flash 0.8s ease-out forwards;
+}
+
+@keyframes reverse-flash {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.5) rotate(-40deg);
+  }
+  35% {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.5) rotate(25deg);
+  }
+}
+
+/* One surge across the ring's existing chevrons, staggered by the same
+   flow order they already march in — so the wave travels the NEW direction
+   the J just set. */
+.direction-ring--flash .ring-chevron {
+  animation: chevron-march 1.8s ease-in-out infinite, chevron-surge 0.75s ease-out;
+}
+
+@keyframes chevron-surge {
+  40% {
+    opacity: 1;
+    color: var(--gold);
+    transform: translate(-50%, -50%) rotate(var(--chevron-rot)) scale(1.9);
   }
 }
 
@@ -1113,6 +1291,9 @@ button.card:not(:disabled):active {
   .burn-ghost,
   .discard-top,
   .discard-stack--burning::after,
+  .pile-fx,
+  .reverse-flash,
+  .direction-ring--flash .ring-chevron,
   .turn-banner,
   .turn-banner--you,
   .seat--forced,
@@ -1130,6 +1311,23 @@ button.card:not(:disabled):active {
   .flight,
   .deal-flight {
     display: none;
+  }
+
+  /* Power-card effects: the moving parts go, the information stays. The
+     fire and the reverse glyph are pure motion, so they're removed
+     outright (GameScreen.jsx also skips loading the lottie instance at
+     all under this query — display: none would keep it rendering). The
+     7's badge is the only one of these carrying a rule that isn't spelled
+     out elsewhere on the table, so it stays — static, and unmounted by its
+     own JS timer rather than by the fade-out keyframe. */
+  .burn-fire,
+  .reverse-flash,
+  .pile-fx {
+    display: none;
+  }
+
+  .pile-rule-badge {
+    animation: none;
   }
 
   /* New in the visual-polish pass: press-feedback transitions go static
