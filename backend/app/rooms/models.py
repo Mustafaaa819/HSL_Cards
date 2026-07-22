@@ -39,6 +39,11 @@ class Room:
     status: RoomStatus = RoomStatus.LOBBY
     game: Game | None = None
     created_at: float = field(default_factory=time.time)
+    # Public in-game chat, oldest → newest, capped at CHAT_LOG_LIMIT (see
+    # routers.game_ws). Kept on the room, not a socket, so a player who
+    # reconnects — or connects late — isn't dropped into a silent table.
+    # In memory only, like everything else in this prototype.
+    chat_log: list[dict] = field(default_factory=list)
 
     @property
     def started(self) -> bool:

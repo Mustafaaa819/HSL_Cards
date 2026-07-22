@@ -86,6 +86,20 @@ async def join_room(code: str, body: PlayerNameBody) -> dict:
     }
 
 
+@router.post("/{code}/reclaim")
+async def reclaim_player(code: str, body: PlayerNameBody) -> dict:
+    """Rejoin an already-started game by name — same response shape as join,
+    so the frontend treats a reclaim result identically to a fresh join."""
+    with _room_errors():
+        room, player = room_manager.reclaim_player(code, body.name)
+    return {
+        "room_code": room.code,
+        "player_id": player.player_id,
+        "token": player.token,
+        "room": room.public_state(),
+    }
+
+
 @router.get("/{code}")
 async def get_room(code: str, x_player_token: str = Header()) -> dict:
     with _room_errors():

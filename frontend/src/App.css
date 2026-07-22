@@ -921,6 +921,59 @@ button.card:not(:disabled):active {
   }
 }
 
+/* Blind flip reveal: the whole table gets to read the card that was turned
+   over — including its owner, who never knew it either — before it resolves
+   onto the pile or gets swept back up. Held over the table centre, big, for
+   BLIND_REVEAL_MS; pointer-events: none like every other overlay here, since
+   the game keeps moving underneath it. */
+.blind-reveal {
+  position: fixed;
+  inset: 0;
+  z-index: 28;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  /* Just enough scrim to lift the card off a busy table, not enough to
+     hide whose turn it is or what the pile says. */
+  background: radial-gradient(circle at 50% 45%, rgb(0 0 0 / 62%), rgb(0 0 0 / 18%) 60%);
+  animation: blind-reveal-in 0.22s ease-out;
+}
+
+.blind-reveal-card {
+  /* .card--lg is the pile size; a blind flip is the one card that should
+     out-read even the pile. */
+  transform: scale(1.5);
+  transform-origin: center;
+  filter: drop-shadow(0 10px 24px rgb(0 0 0 / 55%));
+  animation: blind-reveal-pop 0.42s cubic-bezier(0.2, 1.3, 0.4, 1);
+}
+
+.blind-reveal-caption {
+  /* Cleared of the scaled-up card above it. */
+  margin-top: 26px;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-shadow: 0 2px 8px rgb(0 0 0 / 80%);
+}
+
+@keyframes blind-reveal-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes blind-reveal-pop {
+  from {
+    transform: scale(0.55) rotate(-8deg);
+    opacity: 0;
+  }
+}
+
 /* Companion flash on the (now empty) pile slot while the ghost burns. */
 .discard-stack--burning::after {
   content: '';
@@ -1283,6 +1336,219 @@ button.card:not(:disabled):active {
   color: #fff;
 }
 
+/* chat — toggle chip, over-the-seat bubbles, bottom-sheet drawer.
+   Same glass language as .you-area; no new palette tokens. */
+
+.chat-toggle {
+  position: relative;
+  cursor: pointer;
+  font-family: inherit;
+  line-height: 1;
+  padding: 4px 10px;
+}
+
+.chat-toggle--open {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+/* Gold, not danger: unread chat is an invitation, not a warning. */
+.chat-unread {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--gold);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Anchored by JS at the horizontal centre of the speaker's seat, then
+   pulled up and left off its own box so it sits ABOVE the seat rather than
+   on it — the seat's cards must stay readable while someone talks.
+   Below the toast/overlay layers, above the table. */
+.chat-bubble {
+  position: fixed;
+  z-index: 27;
+  transform: translate(-50%, -115%);
+  pointer-events: none;
+  max-width: 44vw;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  animation: chat-bubble-in 0.18s cubic-bezier(0.2, 0.7, 0.3, 1),
+    chat-bubble-out 0.35s ease 2.15s forwards;
+}
+
+/* Opponent seats sit in the table's TOP arc, so their bubbles hang below
+   the seat — above would put them on the turn banner. Own bubbles keep the
+   default (above the you-area, which is already at the screen's bottom). */
+.chat-bubble--below {
+  transform: translate(-50%, 6px);
+  animation: chat-bubble-in-below 0.18s cubic-bezier(0.2, 0.7, 0.3, 1),
+    chat-bubble-out 0.35s ease 2.15s forwards;
+}
+
+@keyframes chat-bubble-in-below {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px) scale(0.85);
+  }
+}
+
+/* A one-glyph reaction is the emoji itself — the chrome around it just gets
+   in the way at this size. */
+.chat-bubble--reaction {
+  font-size: 30px;
+  padding: 2px 8px;
+  background: none;
+  border: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+@keyframes chat-bubble-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -95%) scale(0.85);
+  }
+}
+
+@keyframes chat-bubble-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* Not an .overlay: no scrim, and the table stays live behind it — you can
+   watch a turn resolve while typing. */
+.chat-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 62svh;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-radius: 16px 16px 0 0;
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgb(255 255 255 / 0.1);
+  box-shadow: 0 -12px 32px rgb(0 0 0 / 0.5);
+  animation: chat-drawer-in 0.2s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+@keyframes chat-drawer-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+.chat-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-log {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.chat-line {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.chat-author {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-line--you .chat-author {
+  color: var(--gold);
+}
+
+.chat-text--reaction {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.chat-quick {
+  display: flex;
+  gap: 4px;
+  justify-content: space-between;
+}
+
+.chat-quick-btn {
+  flex: 1;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-quick-btn:active {
+  border-color: var(--gold);
+}
+
+.chat-compose {
+  display: flex;
+  gap: 6px;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  /* 16px keeps iOS Safari from zooming the whole table on focus. */
+  font-size: 16px;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+
 /* Decorative motion only — nothing above carries information that isn't
    also in the state/text, so it can all be dropped for reduced-motion. */
 @media (prefers-reduced-motion: reduce) {
@@ -1327,6 +1593,25 @@ button.card:not(:disabled):active {
   }
 
   .pile-rule-badge {
+    animation: none;
+  }
+
+  /* The blind reveal is information, not decoration — the card still has to
+     be shown, or nobody at the table learns what was flipped. Only the pop
+     entrance goes; the hold itself is shortened by its own JS timer
+     (BLIND_REVEAL_REDUCED_MS in GameScreen.jsx). */
+  .blind-reveal,
+  .blind-reveal-card {
+    animation: none;
+  }
+
+  /* Chat is information, like the blind reveal — the bubble still has to
+     appear or you can't see who spoke. Only the pop-in and the fade-out
+     go; the bubble is unmounted by its own JS timer (CHAT_BUBBLE_MS), not
+     by the fade keyframe, so dropping the animation can't strand one on
+     screen. The drawer likewise appears in place instead of sliding. */
+  .chat-bubble,
+  .chat-drawer {
     animation: none;
   }
 

@@ -68,13 +68,26 @@ def rig_game(code: str, hands: dict, **kwargs) -> None:
 
 
 def connect(stack: ExitStack, code: str, token: str) -> tuple:
-    """Open an authenticated socket; returns (session, snapshot state dict)."""
+    """Open an authenticated socket; returns (session, snapshot state dict).
+
+    Drains the chat_history frame that always follows the snapshot, so
+    every caller's next receive_json() is the next real thing that
+    happened. Tests that care about the backlog use connect_with_chat.
+    """
+    ws, state, _history = connect_with_chat(stack, code, token)
+    return ws, state
+
+
+def connect_with_chat(stack: ExitStack, code: str, token: str) -> tuple:
+    """As connect, but also returns the connect-time chat backlog."""
     ws = stack.enter_context(client.websocket_connect(f"/ws/{code}"))
     ws.send_json({"token": token})
     message = ws.receive_json()
     assert message["type"] == "state"
     assert message["event"] is None
-    return ws, message["state"]
+    history = ws.receive_json()
+    assert history["type"] == "chat_history"
+    return ws, message["state"], history["messages"]
 
 
 def expect_close(code: str, first_message, expected_close_code: int) -> None:
@@ -362,3 +375,64 @@ def test_reconnect_replaces_socket_and_restores_filtered_state():
         assert message1["event"]["card"] == "3H"
         assert message1["state"]["current_player_id"] == p1
         assert player_entry(message1["state"], p0)["hand_count"] == 1
+
+
+def test_reclaimed_socket_sees_the_same_filtered_state_as_a_live_join():
+    # A player who reclaimed by name (change 3) is invented no new state: the
+    # filtered snapshot their socket receives must match, field for field,
+    # what a normal never-disconnected join returns — minus only the live
+    # AFK countdown, which ticks and is not game state.
+    code, members = make_started_room(2)
+    p0, p1 = (m["player_id"] for m in members)
+    rig_game(
+        code,
+        {
+            p0: {"hand": ["3H", "9C"], "blind": ["4H"]},
+            p1: {"hand": ["5C"], "face_up": ["7D", "KS"], "blind": ["8D", "2C"]},
+        },
+        current=p0,
+    )
+
+    # A normal, never-disconnected connection for P1.
+    with ExitStack() as stack:
+        _ws, live_snapshot = connect(stack, code, members[1]["token"])
+
+    # P1 lost their token entirely (cleared storage) and reclaims by name.
+    response = client.post(f"/rooms/{code}/reclaim", json={"name": "P1"})
+    assert response.status_code == 200, response.text
+    reclaimed = response.json()
+    assert reclaimed["player_id"] == p1
+    assert reclaimed["token"] == members[1]["token"]
+
+    with ExitStack() as stack:
+        _ws, reclaim_snapshot = connect(stack, code, reclaimed["token"])
+
+    # turn_ends_in is a live countdown, not game-relevant content; everything
+    # else — hand, face_up, blind count, active_layer, opponents — is byte-equal.
+    live_snapshot.pop("turn_ends_in", None)
+    reclaim_snapshot.pop("turn_ends_in", None)
+    assert reclaim_snapshot == live_snapshot
+
+
+def test_reclaimed_connection_supersedes_a_live_socket():
+    # The reclaim path arrives on the same token, so the existing 4008
+    # supersede mechanism must still resolve a live-vs-reclaimed collision
+    # rather than leaving two sockets fighting for the seat.
+    code, members = make_started_room(2)
+    p0, p1 = (m["player_id"] for m in members)
+    rig_game(
+        code,
+        {p0: {"hand": ["3H"], "blind": ["4H"]}, p1: {"hand": ["5C"], "blind": ["8D"]}},
+        current=p0,
+    )
+
+    with ExitStack() as stack:
+        ws1_old, _ = connect(stack, code, members[1]["token"])
+
+        reclaimed = client.post(f"/rooms/{code}/reclaim", json={"name": "P1"}).json()
+        ws1_new, snapshot = connect(stack, code, reclaimed["token"])
+        assert snapshot["you"]["hand"] == ["5C"]
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            ws1_old.receive_json()
+        assert exc_info.value.code == WS_SUPERSEDED

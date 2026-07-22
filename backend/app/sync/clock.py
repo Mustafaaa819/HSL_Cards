@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 
 from app.rooms import Room
 
-TURN_TIMEOUT_SECONDS = 60.0
+TURN_TIMEOUT_SECONDS = 25.0
 
 OnTimeout = Callable[[Room], Awaitable[None]]
 

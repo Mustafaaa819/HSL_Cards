@@ -50,6 +50,7 @@ function detailToMessage(detail, status) {
 export const api = {
   createRoom: (name) => request('/rooms', { method: 'POST', body: { name } }),
   joinRoom: (code, name) => request(`/rooms/${code}/join`, { method: 'POST', body: { name } }),
+  reclaimPlayer: (code, name) => request(`/rooms/${code}/reclaim`, { method: 'POST', body: { name } }),
   getRoom: (code, token) => request(`/rooms/${code}`, { token }),
   setReady: (code, token, ready) => request(`/rooms/${code}/ready`, { method: 'PUT', token, body: { ready } }),
   leaveRoom: (code, token) => request(`/rooms/${code}/leave`, { method: 'POST', token }),

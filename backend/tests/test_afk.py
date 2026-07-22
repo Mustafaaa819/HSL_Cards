@@ -1,7 +1,7 @@
 """Phase 5 AFK turn clock over the real socket path.
 
 Each test drives one legal action first: that re-arms the clock at the
-shrunken test timeout (the connect-time arm still holds the real 60s), so
+shrunken test timeout (the connect-time arm still holds the real 25s), so
 the timeout lands on a known player with both sockets already up. No
 sleeping in the test — receive_json() blocks until the forced broadcast
 arrives, which is the thing being tested.

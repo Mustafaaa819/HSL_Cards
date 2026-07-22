@@ -73,6 +73,27 @@ class RoomManager:
         room.players.append(player)
         return room, player
 
+    def reclaim_player(self, code: str, name: str) -> tuple[Room, RoomPlayer]:
+        """Hand a disconnected player back their own seat by name match.
+
+        Only valid once the game has started — a not-yet-started room's lobby
+        already has a normal join flow for this. Identity is proven by room
+        code + the exact (case-insensitive) name they joined with, matching
+        the uniqueness `join_room` enforces; no separate per-player secret.
+        The player's token was never invalidated (nothing here revokes one),
+        so this mints nothing new, it just looks the existing seat back up.
+        Reuses the existing "you don't have access" error shapes rather than
+        inventing new ones: not-started → RoomNotFoundError, unknown name →
+        InvalidTokenError, both already mapped for the frontend.
+        """
+        room = self.get_room(code)
+        if not room.started:
+            raise RoomNotFoundError("This room hasn't started yet — use join instead")
+        for player in room.players:
+            if player.name.casefold() == name.casefold():
+                return room, player
+        raise InvalidTokenError(f"No player named {name!r} in this room")
+
     def set_ready(self, code: str, token: str, ready: bool) -> tuple[Room, RoomPlayer]:
         room = self.get_room(code)
         if room.started:

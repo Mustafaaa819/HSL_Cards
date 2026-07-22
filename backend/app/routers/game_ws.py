@@ -43,6 +43,12 @@ Protocol decisions (documented per the Phase 3 spec):
   happened publicly — notably a blind flip's revealed card, which is
   public the instant it's flipped.
 
+- CHAT: {"action": "chat", "text": "..."} is deliberately NOT a game
+  action. It is branched off before _apply_action ever sees it, so it
+  never touches the engine, never re-arms the AFK clock, and never
+  triggers a filtered state broadcast — chat is public and identical for
+  everyone, unlike state. It also ignores whose turn it is entirely.
+
 - GAME END: sockets are left OPEN after game over (Phase 4 needs them
   for the results screen). The final broadcast has game_over=true and
   the full finish_order; any further action gets an error back.
@@ -52,6 +58,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -69,6 +77,19 @@ WS_INVALID_TOKEN = 4001
 WS_GAME_NOT_STARTED = 4002
 WS_ROOM_NOT_FOUND = 4004
 WS_SUPERSEDED = 4008  # replaced by a newer connection from the same player
+
+# Chat. The length cap is mirrored by the client's maxLength, but the server
+# is the one that enforces it. The cooldown exists for exactly one reason:
+# the quick-tap emoji row makes it trivial to fire ten frames in a second,
+# and a flooded log pushes real messages out of the 50-entry window.
+CHAT_MAX_LENGTH = 240
+CHAT_LOG_LIMIT = 50
+CHAT_MIN_INTERVAL_SECONDS = 0.3
+
+# (room_code, player_id) -> last accepted chat timestamp. Module-level and
+# never swept, same stance as the room store itself in this prototype: an
+# abandoned room leaves a couple of floats behind, and that's all.
+_last_chat_at: dict[tuple[str, str], float] = {}
 
 
 class ProtocolError(Exception):
@@ -124,6 +145,12 @@ async def game_socket(websocket: WebSocket, room_code: str) -> None:
         {"type": "state", "event": None, "state": filtered_state(room, player.player_id)}
     )
 
+    # Backlog as its own frame rather than folded into the snapshot: the
+    # state payload's shape is documented and consumed field by field, and
+    # chat has nothing to do with game state. Always sent, even when empty,
+    # so the client has one unconditional ordering to code against.
+    await websocket.send_json({"type": "chat_history", "messages": list(room.chat_log)})
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -162,6 +189,13 @@ async def _handle_message(websocket: WebSocket, room: Room, player_id: str, raw:
         await _send_error(websocket, "Messages must be JSON objects", "protocol")
         return
 
+    # Before the action dispatch on purpose: chat is not a move. Everything
+    # below this line arms the turn clock and re-broadcasts state, and chat
+    # must do neither.
+    if message.get("action") == "chat":
+        await _handle_chat(websocket, room, player_id, message)
+        return
+
     try:
         event = _apply_action(room.game, player_id, message)
     except (ProtocolError, EngineError) as err:
@@ -177,6 +211,50 @@ async def _handle_message(websocket: WebSocket, room: Room, player_id: str, raw:
     # broadcast's awaits.
     turn_clock.arm(room, _force_afk_move)
     await _broadcast_state(room, event)
+
+
+async def _handle_chat(websocket: WebSocket, room: Room, player_id: str, message: dict) -> None:
+    """Broadcast one chat message to the whole room. Never a game action.
+
+    No turn check and no phase check: chat works whenever the socket is
+    open, including on someone else's turn and after game over. The only
+    two rules are a length cap (rejected loudly, it's a client bug or a
+    paste) and a per-sender cooldown (dropped silently — a rate-limit
+    toast for holding down an emoji would be worse than the flood).
+    """
+    text = message.get("text")
+    if not isinstance(text, str):
+        await _send_error(websocket, 'A chat message needs a "text" string', "protocol")
+        return
+    text = text.strip()
+    if not text:
+        await _send_error(websocket, "Chat messages can't be empty", "protocol")
+        return
+    if len(text) > CHAT_MAX_LENGTH:
+        await _send_error(
+            websocket, f"Chat messages are limited to {CHAT_MAX_LENGTH} characters", "protocol"
+        )
+        return
+
+    now = time.time()
+    key = (room.code, player_id)
+    if now - _last_chat_at.get(key, 0.0) < CHAT_MIN_INTERVAL_SECONDS:
+        return  # silent by design — see docstring
+    _last_chat_at[key] = now
+
+    entry = {"id": secrets.token_hex(4), "player_id": player_id, "text": text, "ts": now}
+    room.chat_log.append(entry)
+    if len(room.chat_log) > CHAT_LOG_LIMIT:
+        del room.chat_log[:-CHAT_LOG_LIMIT]  # drop oldest, keep the newest 50
+
+    # One identical payload for everyone — the reason this doesn't reuse
+    # _broadcast_state, which has to rebuild a filtered view per player.
+    payload = {"type": "chat", "message": entry}
+    for target_id, socket in connection_hub.connections(room.code).items():
+        try:
+            await socket.send_json(payload)
+        except (WebSocketDisconnect, RuntimeError):
+            connection_hub.unregister(room.code, target_id, socket)
 
 
 def _display_name(room: Room, player_id: str) -> str:

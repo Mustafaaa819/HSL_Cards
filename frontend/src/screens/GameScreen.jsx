@@ -11,8 +11,8 @@ import fireAnimation from '../assets/animations/fire.json'
 // Once a turn has been stalled this long, everyone gets told who the table
 // is waiting on — otherwise the eventual forced pickup/flip/skip looks like
 // a glitch to the other players.
-const STALL_WARNING_SECONDS = 30
-const URGENT_SECONDS = 10
+const STALL_WARNING_SECONDS = 12
+const URGENT_SECONDS = 7
 
 // Flight/burn/flash durations live in App.css; these only bound how long the
 // transient DOM for each effect sticks around. Generous on purpose — removal
@@ -24,6 +24,34 @@ const FLIGHT_CLEANUP_MS = 450
 const FIRE_MS = 1000
 const BURN_CLEANUP_MS = FIRE_MS + 160
 const FORCED_FLASH_MS = 900
+
+// A blind flip is the one moment the table learns a card nobody knew —
+// including its owner — so it gets held big and centred before the pile
+// resolution runs. Long enough to read across a room on a phone; the
+// reduced-motion hold is shorter because the information (not the beat) is
+// what those users still need.
+const BLIND_REVEAL_MS = 2000
+const BLIND_REVEAL_REDUCED_MS = 900
+
+// A chat bubble pops over the sender's seat and fades. Short on purpose:
+// the drawer is the record, the bubble is only the "who just said
+// something" glance. Reduced motion keeps the same hold — unlike the blind
+// reveal, nothing here is information the table can't get elsewhere, so
+// there's no reason to shorten it, only to stop it moving.
+const CHAT_BUBBLE_MS = 2500
+// Mirrors the server cap (docs/WS_PROTOCOL.md "Chat"); the server is still
+// the one enforcing it.
+const CHAT_MAX_LENGTH = 240
+// The server keeps 50; the client can afford a longer scrollback across a
+// session, since chat_history only ever re-seeds the newest 50.
+const CHAT_LOG_MAX = 100
+const QUICK_EMOJI = ['😂', '🔥', '😱', '👏', '😤', '💀', '🤔', '🤝']
+
+// A one-glyph message IS a reaction (no separate action type on the wire —
+// see WS_PROTOCOL.md), so it's detected rather than flagged: at most two
+// code points and no alphanumerics. Spread, not .length, so a surrogate
+// pair counts as one character.
+const isReaction = (text) => [...text].length <= 2 && !/[a-z0-9]/i.test(text)
 
 // 2 / 7 / J pile reactions. The ring and glyph animations are under a
 // second; the 7's badge deliberately outlives its ripple so the rank
@@ -103,6 +131,33 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   // because it outlives the ripple that introduces it.
   const [powerFx, setPowerFx] = useState(null)
   const [ruleBadge, setRuleBadge] = useState(null)
+  // { id, card, playerId } of the blind flip currently being shown, plus the
+  // FIFO of flips still waiting their turn. Unlike burn/powerFx (which
+  // clobber each other on a timestamp key), reveals must never be skipped:
+  // a chained flip whose reveal got dropped is a card the table never saw.
+  const [blindReveal, setBlindReveal] = useState(null)
+
+  // Chat. `chatLog` is the record (seeded by chat_history on every connect,
+  // appended to by chat), `bubbles` is the transient over-the-seat layer,
+  // and `unread` counts what arrived while the drawer was shut.
+  const [chatLog, setChatLog] = useState([])
+  const [chatOpen, setChatOpen] = useState(false)
+  const [bubbles, setBubbles] = useState([])
+  const [unread, setUnread] = useState(0)
+  const [chatDraft, setChatDraft] = useState('')
+  // Read inside the socket handler, which must see the value as of the
+  // message — not as of the render that installed the handler.
+  const chatOpenRef = useRef(chatOpen)
+  chatOpenRef.current = chatOpen
+  // One timer per live bubble (several players can talk at once), all
+  // cleared together on unmount like every other effect timer here.
+  const bubbleTimers = useRef(new Set())
+  const chatListRef = useRef(null)
+
+  const revealQueue = useRef([])
+  const revealBusy = useRef(false)
+  const revealSeq = useRef(0)
+  const revealTimer = useRef(null)
   const discardRef = useRef(null)
   const blindRowRef = useRef(null)
   const faceUpRowRef = useRef(null)
@@ -136,7 +191,7 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
     setDealGhosts([])
   }
 
-  const runMotion = (event, state) => {
+  const resolveMotion = (event, state) => {
     const to = rectOf(discardRef.current)
     if (!to) return
     const myId = state.you.player_id
@@ -169,6 +224,29 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
           { id: `${event.card}-${Date.now()}`, spec: event.card, from, to },
         ])
       }
+    } else if (event.kind === 'flip' && event.picked_up) {
+      // The mirror image of a play: the flipped card didn't beat the pile,
+      // so the same ghost flies the other way — off the pile and into
+      // whoever flipped it. Destination is a card-sized box centred on their
+      // area (the raw rect is a whole panel/seat, which would anchor the
+      // ghost at its corner), sized to match the pile card so the flight
+      // reads as travel rather than a resize.
+      const target =
+        event.player_id === myId
+          ? rectOf(youAreaRef.current)
+          : rectOf(seatRefs.current[event.player_id])
+      if (target) {
+        const dest = {
+          x: target.x + target.w / 2 - to.w / 2,
+          y: target.y + target.h / 2 - to.h / 2,
+          w: to.w,
+          h: to.h,
+        }
+        setFlights((cur) => [
+          ...cur.slice(-2),
+          { id: `${event.card}-back-${Date.now()}`, spec: event.card, from: to, to: dest },
+        ])
+      }
     }
     pendingTapRef.current = null
 
@@ -199,6 +277,39 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
     }
   }
 
+  // Show the head of the reveal queue, and only once its hold is over let
+  // that flip resolve into the pile motion — then immediately start the next
+  // one. Chained flips (a flipped 2 arms another flip) therefore play out as
+  // reveal → resolve → reveal → resolve, never overlapping.
+  const startNextReveal = () => {
+    const next = revealQueue.current.shift()
+    if (!next) {
+      revealBusy.current = false
+      setBlindReveal(null)
+      return
+    }
+    revealBusy.current = true
+    const { event, state } = next
+    revealSeq.current += 1
+    setBlindReveal({ id: revealSeq.current, card: event.card, playerId: event.player_id })
+    const hold = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      ? BLIND_REVEAL_REDUCED_MS
+      : BLIND_REVEAL_MS
+    revealTimer.current = setTimeout(() => {
+      resolveMotion(event, state)
+      startNextReveal()
+    }, hold)
+  }
+
+  const runMotion = (event, state) => {
+    if (event.kind === 'flip') {
+      revealQueue.current.push({ event, state })
+      if (!revealBusy.current) startNextReveal()
+      return
+    }
+    resolveMotion(event, state)
+  }
+
   const { gameState, status, sendAction, reclaim } = useGameSocket(session.roomCode, session.token, {
     onServerError: (payload) => {
       clearTimeout(toastTimer.current)
@@ -219,6 +330,34 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
       setError(null)
       runMotion(event, state)
     },
+    onChat: (entry) => {
+      setChatLog((cur) => [...cur, entry].slice(-CHAT_LOG_MAX))
+      if (!chatOpenRef.current) setUnread((n) => n + 1)
+
+      // Anchor rect is captured now, the same way flights capture theirs:
+      // the bubble is a fixed-position overlay, so it needs a position, not
+      // a live element. A seat that can't be measured just gets no bubble —
+      // the message is still in the log either way.
+      const mine = entry.player_id === session.playerId
+      const rect = mine ? rectOf(youAreaRef.current) : rectOf(seatRefs.current[entry.player_id])
+      if (!rect) return
+      // Your own bubble sits above the you-area (the screen's bottom edge is
+      // right below it); opponents' hang below their seat, because the seat
+      // arc is at the TOP of the table and a bubble above it would land on
+      // the turn banner. Either way it points at the speaker over empty felt.
+      setBubbles((cur) => [
+        ...cur,
+        { id: entry.id, x: rect.x + rect.w / 2, y: mine ? rect.y : rect.y + rect.h, below: !mine, text: entry.text },
+      ])
+      const timer = setTimeout(() => {
+        bubbleTimers.current.delete(timer)
+        setBubbles((cur) => cur.filter((b) => b.id !== entry.id))
+      }, CHAT_BUBBLE_MS)
+      bubbleTimers.current.add(timer)
+    },
+    // Replaces rather than merges: the backlog is authoritative and arrives
+    // on every (re)connect, so merging would duplicate the tail.
+    onChatHistory: (messages) => setChatLog(messages.slice(-CHAT_LOG_MAX)),
     onFatalClose,
   })
 
@@ -229,10 +368,41 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
       clearTimeout(flashTimer.current)
       clearTimeout(powerFxTimer.current)
       clearTimeout(ruleBadgeTimer.current)
+      clearTimeout(revealTimer.current)
       clearInterval(dealTimer.current)
+      bubbleTimers.current.forEach(clearTimeout)
+      bubbleTimers.current.clear()
     },
     []
   )
+
+  // Follow the conversation: a message arriving while the drawer is open
+  // should be visible without scrolling for it.
+  useEffect(() => {
+    if (!chatOpen) return
+    const list = chatListRef.current
+    if (list) list.scrollTop = list.scrollHeight
+  }, [chatOpen, chatLog])
+
+  // The phone back gesture must close the chat drawer, NOT navigate away.
+  // While the drawer is open we own one history entry: opening pushes it, a
+  // back gesture pops it (popstate → just close the drawer, the navigation
+  // is spent on our entry instead of falling through to leave the page and
+  // tear down the socket), and closing via the in-app button consumes it so
+  // the stack can't grow across repeated open/close cycles.
+  useEffect(() => {
+    if (!chatOpen) return undefined
+    window.history.pushState({ chatOpen: true }, '')
+    const onPop = () => setChatOpen(false)
+    window.addEventListener('popstate', onPop)
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      // Closed by the button (not by back): our entry is still current, so
+      // pop it ourselves. After a back gesture the entry is already gone —
+      // history.state no longer carries our marker — so we leave it alone.
+      if (window.history.state?.chatOpen) window.history.back()
+    }
+  }, [chatOpen])
 
   // Build the deal script off the first snapshot (all counts/cards are
   // already final — the server dealt everything in one shot at start), then
@@ -382,6 +552,14 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   // sorted the moment the deal settles.
   const youHand = youShown ? you.hand.slice(0, youShown.hand) : sortHand(you.hand)
 
+  // Once the hand is gone, the face-up row IS the hand: same rows, same size,
+  // same controls. Only the id prefix stays layer-specific, so the selection
+  // pruning above keeps recognising these cards without knowing they moved.
+  const activeLayer = you.active_layer
+  const activeCards = activeLayer === 'hand' ? youHand : activeLayer === 'face_up' ? youFaceUp : []
+  const activeIdPrefix = activeLayer === 'face_up' ? 'faceup' : 'hand'
+  const faceUpPromoted = activeLayer === 'face_up'
+
   // A picked-up pile can easily put 9+ cards in hand. Rather than let one
   // fan run off the side into a horizontal scroll, split it into stacked
   // rows so the whole hand is visible at once. HAND_ROW_MAX is fixed
@@ -390,12 +568,12 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   // with room to spare for the arc's tilt. Rows are then evened out
   // (9 renders 5+4, not 6+3) so neither row looks like a leftover.
   const handRows = []
-  if (youHand.length > 0) {
-    const rowCount = Math.ceil(youHand.length / HAND_ROW_MAX)
-    const perRow = Math.ceil(youHand.length / rowCount)
-    for (let start = 0; start < youHand.length; start += perRow) {
+  if (activeCards.length > 0) {
+    const rowCount = Math.ceil(activeCards.length / HAND_ROW_MAX)
+    const perRow = Math.ceil(activeCards.length / rowCount)
+    for (let start = 0; start < activeCards.length; start += perRow) {
       handRows.push(
-        youHand.slice(start, start + perRow).map((spec, k) => ({ spec, i: start + k }))
+        activeCards.slice(start, start + perRow).map((spec, k) => ({ spec, i: start + k }))
       )
     }
   }
@@ -414,6 +592,25 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
   }
   const flipBlind = (index) => sendAction({ action: 'flip', index })
   const pickUpPile = () => sendAction({ action: 'pick_up' })
+
+  // Mirrors the server's validation rather than replacing it: the server
+  // rejects empty text too, this just avoids sending a frame that can only
+  // be refused. Length is capped by the input's maxLength.
+  const sendChat = (text) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    sendAction({ action: 'chat', text: trimmed })
+  }
+
+  const submitChatDraft = () => {
+    sendChat(chatDraft)
+    setChatDraft('')
+  }
+
+  const openChat = () => {
+    setChatOpen(true)
+    setUnread(0)
+  }
 
   const selectionRank = selection.length > 0 ? parseCard(selection[0].spec).rank : null
   const selectedIds = new Set(selection.map((s) => s.id))
@@ -468,6 +665,15 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
         <span className="chip" title={gameState.direction === 1 ? 'Play order: clockwise' : 'Play order: reversed'}>
           {gameState.direction === 1 ? '⟳' : '⟲'}
         </span>
+        <button
+          type="button"
+          className={chatOpen ? 'chip chat-toggle chat-toggle--open' : 'chip chat-toggle'}
+          onClick={() => (chatOpen ? setChatOpen(false) : openChat())}
+          aria-label={unread > 0 ? `Chat, ${unread} unread` : 'Chat'}
+        >
+          💬
+          {unread > 0 && !chatOpen && <span className="chat-unread">{unread > 9 ? '9+' : unread}</span>}
+        </button>
       </header>
 
 
@@ -618,15 +824,12 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
         </div>
 
         <div className="you-row you-row--faceup">
-          <span
-            className={
-              you.active_layer === 'face_up' ? 'row-caption row-caption--active' : 'row-caption'
-            }
-          >
-            face-up{you.active_layer === 'face_up' ? ' — in play' : ''}
-          </span>
+          <span className="row-caption">face-up</span>
+          {/* Promoted: these cards now render full-size in the hand section
+              below, so the preview row would be showing them twice. */}
           <div className="row-cards" ref={faceUpRowRef}>
-            {youFaceUp.map((spec, i) => {
+            {faceUpPromoted && <span className="row-empty">cleared</span>}
+            {!faceUpPromoted && youFaceUp.map((spec, i) => {
               const id = `faceup-${spec}-${i}`
               const rankMismatch =
                 multiSelectMode && selectionRank != null && parseCard(spec).rank !== selectionRank
@@ -642,13 +845,17 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
                 />
               )
             })}
-            {youFaceUp.length === 0 && !dealing && <span className="row-empty">cleared</span>}
+            {!faceUpPromoted && youFaceUp.length === 0 && !dealing && (
+              <span className="row-empty">cleared</span>
+            )}
           </div>
         </div>
 
         <div className="you-row you-row--hand">
           <div className="hand-header">
-            <span className="row-caption">hand · {youHand.length}</span>
+            {/* Always "hand", whichever layer is feeding it — during face-up
+                play these cards ARE the player's hand. */}
+            <span className="row-caption">hand · {activeCards.length}</span>
             <div className="hand-actions">
               {multiSelectMode ? (
                 <>
@@ -697,7 +904,7 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
                   // `i` is the card's index in the whole hand, not in this
                   // row — identity (and therefore selection) must not shift
                   // when a card lands in a different row.
-                  const id = `hand-${spec}-${i}`
+                  const id = `${activeIdPrefix}-${spec}-${i}`
                   const rankMismatch =
                     multiSelectMode &&
                     selectionRank != null &&
@@ -731,7 +938,7 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
                       <Card
                         spec={spec}
                         size="md"
-                        dimmed={you.active_layer !== 'hand' || !myTurn || rankMismatch}
+                        dimmed={!myTurn || rankMismatch}
                         selected={isSelected}
                         rejected={isRejected}
                         onClick={(e) => tapCard(id, spec, e.currentTarget)}
@@ -741,7 +948,7 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
                 })}
               </div>
             ))}
-            {youHand.length === 0 && !dealing && <span className="row-empty">empty</span>}
+            {activeCards.length === 0 && !dealing && <span className="row-empty">empty</span>}
           </div>
         </div>
       </section>
@@ -778,6 +985,55 @@ export default function GameScreen({ session, dealOnEntry, onLeave, onFatalClose
               loads (see BurnFire's cleanup). */}
           <BurnFire key={`fire-${burn.id}`} rect={burn.rect} />
         </>
+      )}
+
+      {/* Centred rather than drawn at the flipper's seat: the seat markers
+          are far too small on a phone to read a card off. Keyed on the
+          sequence number so a chained flip remounts (and replays) instead of
+          swapping the face inside a card that's already sitting still. */}
+      {blindReveal && (
+        <div className="blind-reveal" key={blindReveal.id} aria-hidden="true">
+          <div className="blind-reveal-card">
+            <Card spec={blindReveal.card} size="lg" />
+          </div>
+          <span className="blind-reveal-caption">
+            {nameById[blindReveal.playerId] ?? 'Someone'} flips blind
+          </span>
+        </div>
+      )}
+
+      {/* Anchored over each speaker, centred on the seat/you-area rect that
+          was measured when the message landed. pointer-events: none in CSS
+          — a bubble must never swallow a tap on the card underneath it. */}
+      {bubbles.map((bubble) => (
+        <div
+          key={bubble.id}
+          className={[
+            'chat-bubble',
+            bubble.below ? 'chat-bubble--below' : '',
+            isReaction(bubble.text) ? 'chat-bubble--reaction' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          style={{ left: bubble.x, top: bubble.y }}
+          aria-hidden="true"
+        >
+          {bubble.text}
+        </div>
+      ))}
+
+      {chatOpen && (
+        <ChatDrawer
+          log={chatLog}
+          nameById={nameById}
+          youId={you.player_id}
+          draft={chatDraft}
+          listRef={chatListRef}
+          onDraftChange={setChatDraft}
+          onSend={submitChatDraft}
+          onQuickSend={sendChat}
+          onClose={() => setChatOpen(false)}
+        />
       )}
 
       {error && (
@@ -1115,6 +1371,91 @@ function FlightCard({ flight, onDone }) {
       aria-hidden="true"
     >
       <Card spec={spec} size="lg" />
+    </div>
+  )
+}
+
+// Bottom sheet, mounted only while open so it takes zero layout space (and
+// costs no taps) the rest of the time. Deliberately not an .overlay: the
+// table stays visible and playable behind it — you can watch a turn resolve
+// while typing.
+function ChatDrawer({
+  log,
+  nameById,
+  youId,
+  draft,
+  listRef,
+  onDraftChange,
+  onSend,
+  onQuickSend,
+  onClose,
+}) {
+  return (
+    <div className="chat-drawer">
+      <div className="chat-drawer-head">
+        <span className="row-caption">chat</span>
+        <button className="button button--tiny button--quiet" type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+
+      <div className="chat-log" ref={listRef}>
+        {log.length === 0 && <span className="row-empty">no messages yet</span>}
+        {log.map((entry) => (
+          <p
+            key={entry.id}
+            className={entry.player_id === youId ? 'chat-line chat-line--you' : 'chat-line'}
+          >
+            <span className="chat-author">{nameById[entry.player_id] ?? 'Someone'}</span>
+            {/* Plain text child, never dangerouslySetInnerHTML — React's
+                default escaping is the whole defence here. */}
+            <span className={isReaction(entry.text) ? 'chat-text chat-text--reaction' : 'chat-text'}>
+              {entry.text}
+            </span>
+          </p>
+        ))}
+      </div>
+
+      {/* One tap = one message. The glyph goes over the wire as ordinary
+          chat text; only the rendering treats it as a reaction. */}
+      <div className="chat-quick">
+        {QUICK_EMOJI.map((glyph) => (
+          <button
+            key={glyph}
+            className="chat-quick-btn"
+            type="button"
+            onClick={() => onQuickSend(glyph)}
+            aria-label={`Send ${glyph}`}
+          >
+            {glyph}
+          </button>
+        ))}
+      </div>
+
+      <form
+        className="chat-compose"
+        onSubmit={(e) => {
+          e.preventDefault()
+          onSend()
+        }}
+      >
+        <input
+          className="chat-input"
+          type="text"
+          value={draft}
+          maxLength={CHAT_MAX_LENGTH}
+          placeholder="Say something…"
+          onChange={(e) => onDraftChange(e.target.value)}
+          aria-label="Chat message"
+        />
+        <button
+          className="button button--tiny button--gold"
+          type="submit"
+          disabled={draft.trim().length === 0}
+        >
+          Send
+        </button>
+      </form>
     </div>
   )
 }

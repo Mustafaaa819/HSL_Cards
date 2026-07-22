@@ -42,6 +42,12 @@ export function useGameSocket(roomCode, token, handlers) {
         setStatus('connected')
         setGameState(message.state)
         if (message.event) handlersRef.current?.onEvent?.(message.event, message.state)
+      } else if (message.type === 'chat') {
+        handlersRef.current?.onChat?.(message.message)
+      } else if (message.type === 'chat_history') {
+        // Always arrives right after the connect snapshot, empty log
+        // included — so this replaces the client's log rather than merging.
+        handlersRef.current?.onChatHistory?.(message.messages ?? [])
       } else if (message.type === 'error') {
         // Whole payload, not just the text: `code` and `card` are what let
         // the UI highlight the exact card the server refused.

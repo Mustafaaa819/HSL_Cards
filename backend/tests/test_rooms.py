@@ -130,6 +130,59 @@ def test_duplicate_name_in_room_is_rejected():
     assert response.status_code == 409
 
 
+# ---------------------------------------------------------------- reclaim
+
+
+def reclaim(code: str, name: str):
+    return client.post(f"/rooms/{code}/reclaim", json={"name": name})
+
+
+def test_reclaim_returns_the_same_seat_and_token():
+    code, members = make_ready_room(2)
+    assert start(code, members[0]["token"]).status_code == 200
+
+    original = members[1]
+    response = reclaim(code, "P1")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    # No new seat is minted — same player_id and same token as the join.
+    assert data["player_id"] == original["player_id"]
+    assert data["token"] == original["token"]
+    assert data["room"]["status"] == "in_progress"
+
+    # And that token still authenticates against the live room.
+    room = room_manager.get_room(code)
+    player = room_manager.authenticate(room, data["token"])
+    assert player.player_id == original["player_id"]
+
+
+def test_reclaim_is_case_insensitive_on_name():
+    code, members = make_ready_room(2)
+    assert start(code, members[0]["token"]).status_code == 200
+    response = reclaim(code, "p1")
+    assert response.status_code == 200
+    assert response.json()["player_id"] == members[1]["player_id"]
+
+
+def test_reclaim_before_start_is_rejected():
+    code, members = make_ready_room(2)  # readied but never started
+    response = reclaim(code, "P1")
+    assert response.status_code == 404
+    assert "join" in response.json()["detail"].lower()
+
+
+def test_reclaim_unknown_name_is_rejected():
+    code, members = make_ready_room(2)
+    assert start(code, members[0]["token"]).status_code == 200
+    response = reclaim(code, "Nobody")
+    assert response.status_code == 401
+
+
+def test_reclaim_nonexistent_room_is_404():
+    response = reclaim("ZZZZZ", "Ghost")
+    assert response.status_code == 404
+
+
 # ---------------------------------------------------------------- ready-up
 
 

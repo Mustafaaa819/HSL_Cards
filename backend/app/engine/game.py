@@ -73,6 +73,39 @@ class FlipResult:
     must_throw_again: bool = False
 
 
+def _deal_face_up(deck: list[Card], rng: random.Random) -> list[Card]:
+    """Deal one player's LAYER_SIZE face-up (Layer 2) cards, capped at a
+    single power card. `deck` is drawn off the end via `.pop()`, exactly as
+    the other layers are, so a face-up layer with no power collision is dealt
+    identically to before this cap existed.
+
+    When a second power card would be dealt, it is returned to `deck` at a
+    random index and replaced by a randomly chosen non-power card. Both the
+    reinsert position and the replacement pick are randomised: the deck was
+    shuffled once and drawn from the end, so any fixed choice here would make
+    the swapped card's future draw position predictable — a fairness feature
+    must not introduce that bias. The replacement is guaranteed non-power, so
+    exactly one swap resolves it — no loop or recursion.
+    """
+    face_up: list[Card] = []
+    has_power = False
+    for _ in range(LAYER_SIZE):
+        card = deck.pop()
+        if card.is_power and has_power:
+            # Return the surplus power card to a random slot in the deck…
+            deck.insert(rng.randrange(len(deck) + 1), card)
+            # …and draw a random non-power card in its place.
+            non_power = [i for i, c in enumerate(deck) if not c.is_power]
+            if not non_power:
+                raise InvalidSetupError(
+                    "No non-power card left to keep a face-up layer under the power cap"
+                )
+            card = deck.pop(rng.choice(non_power))
+        has_power = has_power or card.is_power
+        face_up.append(card)
+    return face_up
+
+
 class Game:
     def __init__(self, player_ids: list[str], rng: random.Random | None = None):
         if len(set(player_ids)) != len(player_ids):
@@ -87,7 +120,7 @@ class Game:
                 Player(
                     player_id=pid,
                     blind=[deck.pop() for _ in range(LAYER_SIZE)],
-                    face_up=[deck.pop() for _ in range(LAYER_SIZE)],
+                    face_up=_deal_face_up(deck, self.rng),
                     hand=[deck.pop() for _ in range(LAYER_SIZE)],
                 )
             )

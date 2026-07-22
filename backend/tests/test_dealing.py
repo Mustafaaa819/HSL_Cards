@@ -49,6 +49,34 @@ def test_six_player_game_deals_from_two_decks():
     assert all(copies == 2 for copies in Counter(everywhere).values())
 
 
+def test_face_up_never_holds_two_power_cards():
+    # Across many seeds and player counts, no player's Layer 2 (face_up)
+    # may ever contain more than one power card.
+    for seed in range(300):
+        for count in (2, 3, 5):
+            game = Game([f"p{i}" for i in range(count)], rng=random.Random(seed))
+            for player in game.players:
+                powers = sum(1 for c in player.face_up if c.is_power)
+                assert powers <= 1, f"seed={seed} count={count}: {player.face_up}"
+
+
+def test_deal_conserves_every_power_card():
+    # A power card swapped out of a face-up layer must still exist somewhere —
+    # the swap moves cards around, it never destroys them. Compare the full
+    # multiset of cards after dealing against a fresh deck of the same size.
+    for seed in range(200):
+        for count in (2, 3, 5):
+            rng = random.Random(seed)
+            game = Game([f"p{i}" for i in range(count)], rng=rng)
+            dealt = list(game.draw_deck)
+            for player in game.players:
+                dealt += player.hand + player.face_up + player.blind
+            # game already drew one turn-start card into the current hand, so
+            # the pile is empty and every original card is accounted for above.
+            expected = build_deck(count, random.Random(seed))
+            assert Counter(dealt) == Counter(expected)
+
+
 def test_player_count_validation():
     with pytest.raises(InvalidSetupError):
         build_deck(1)

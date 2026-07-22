@@ -10,8 +10,9 @@ once the room has started.
 2. Send **one JSON text frame** within 10 seconds: `{"token": "<your bearer token>"}`
    (the token returned by room create/join). First-message auth was chosen
    over a query param so tokens never land in server/proxy access logs.
-3. On success the server replies with a state snapshot (see below). On
-   failure it closes the socket:
+3. On success the server replies with a state snapshot, immediately
+   followed by a `chat_history` frame (see [Chat](#chat) — always sent,
+   even when the log is empty). On failure it closes the socket:
 
 | Close code | Meaning |
 |---|---|
@@ -24,6 +25,17 @@ once the room has started.
 **Reconnect:** connecting again with the same token replaces the old socket
 (closed with 4008) and the new socket immediately receives the current
 filtered snapshot. Other players see nothing.
+
+**Reclaim (lost token):** a player who lost their token entirely — cleared
+storage, new device — gets their seat back over REST, not the socket:
+`POST /rooms/{code}/reclaim` with `{"name": "<their exact join name>"}`.
+Identity is room code + name (case-insensitive), no per-player secret —
+a deliberate trade-off for a trusted friend group. The response mirrors
+`POST /rooms/{code}/join` (`room_code`, `player_id`, `token`, `room`), so
+the returned token connects the socket like any other. Only valid once the
+game has started (before that, use `join`); `404` if the room isn't started
+or doesn't exist, `401` if no player has that name. The reclaimed socket
+supersedes any live one for that seat via the usual 4008 mechanism.
 
 ## Client → server actions
 
@@ -54,7 +66,11 @@ play advances. The server signals this via `pending_action` in every state
 payload and `must_throw_again` / `must_flip_again` on events; there is no
 new client action, just another `play`/`flip` from the same player.
 
-That is the complete list. Notably there is **no "skip" action** — the
+There is also `{"action": "chat", "text": "..."}`, which rides this same
+socket but is **not a game action** — it never reaches the engine. See
+[Chat](#chat).
+
+That is the complete list of *moves*. Notably there is **no "skip" action** — the
 server can pass an AFK player's turn (see below), but a skip is never
 offered to a client and `{"action": "skip"}` is rejected like any other
 unknown action.
@@ -92,7 +108,7 @@ actually sends that form.
 
 ## AFK / turn timeout
 
-Each turn is allowed **60 seconds**. The clock is armed when the first
+Each turn is allowed **25 seconds**. The clock is armed when the first
 socket connects and re-armed on every legal action; it is driven by the
 room, not by a socket, so a player who closed their tab still times out.
 Illegal moves do not reset it.
@@ -198,6 +214,83 @@ player, so the UI can say "timed out" instead of "picked up". There is no
   }
 }
 ```
+
+## Chat
+
+Text chat and emoji reactions ride the game socket as a separate message
+type. There is no second connection and no REST endpoint, and — importantly
+— chat is **not routed through the action path**: it never touches the
+engine, never re-arms the AFK clock, and never triggers a state broadcast.
+A player chatting during their own turn still runs out of time exactly on
+schedule.
+
+There is deliberately no separate "reaction" action. A one-glyph emoji
+message *is* a reaction; the client styles it differently by inspecting the
+text, which needs no protocol support.
+
+### Client → server
+
+```jsonc
+{"action": "chat", "text": "nice nuke"}
+```
+
+- `text` must be a string, non-empty after stripping surrounding
+  whitespace, and at most **240 characters**. Anything else is a
+  `protocol` error to the sender (`card: null`), and nothing is logged or
+  broadcast.
+- The stored/broadcast text is the **stripped** string.
+- Allowed **regardless of whose turn it is**, of the phase, and of whether
+  the game is already over. The only requirement is an authenticated open
+  socket.
+- **Rate guard:** a message sent less than **300ms** after that same
+  player's previous accepted message is **silently dropped** — no
+  broadcast, and no error frame either. The cooldown is per (room, player),
+  so one player spamming never mutes another. Silent rather than rejected
+  because the quick-tap emoji row makes this easy to hit by accident, and a
+  toast per tap would be worse than the flood it prevents.
+
+There is no profanity filter, moderation, or edit/delete. This is a
+friend-group prototype.
+
+### Server → client
+
+Broadcast to **every** connected socket in the room, including the sender's,
+as one identical payload — unlike `state`, chat carries no hidden
+information, so there is no per-player filtering:
+
+```jsonc
+{
+  "type": "chat",
+  "message": {
+    "id": "9f3a1c04",          // secrets.token_hex(4), unique per message
+    "player_id": "…",          // sender; resolve to a name via state.players
+    "text": "nice nuke",       // stripped, ≤240 chars, plain text
+    "ts": 1753027200.123       // server wall-clock seconds (display only —
+                               // unlike turn_ends_in, this is NOT skew-safe
+                               // and must not be used for timing)
+  }
+}
+```
+
+The message carries no display name: names already arrive in every `state`
+payload, and duplicating them here would let a rename drift out of sync.
+
+### Connect-time backlog
+
+Immediately after the connect snapshot, and **only** to the connecting
+socket:
+
+```jsonc
+{"type": "chat_history", "messages": [ /* chat message objects, oldest → newest */ ]}
+```
+
+Sent unconditionally, including as an empty list, so clients have one fixed
+frame ordering to code against: `state` then `chat_history`.
+
+The room keeps the **last 50** messages in memory (oldest dropped on
+overflow), so a reconnecting or late-connecting player isn't dropped into a
+silent table. Nothing is persisted — the log dies with the room, like all
+other state in this prototype.
 
 ## Game end
 

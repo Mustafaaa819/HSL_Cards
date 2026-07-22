@@ -46,7 +46,12 @@ export default function App() {
     saveSession(next)
     setSession(next)
     setNotice(null)
-    setStage('lobby')
+    // Create/join land in the lobby; a reclaim (change 3) hands back a result
+    // whose room is already in progress and must go straight to the table.
+    // Same condition the 'resolving' effect uses for a reload/reconnect —
+    // and, exactly like those, freshStart stays false: the deal animation is
+    // for a genuine fresh start only, never for rejoining a dealt hand.
+    setStage(result.room?.status === 'in_progress' ? 'game' : 'lobby')
   }
 
   function leaveToEntry(message) {

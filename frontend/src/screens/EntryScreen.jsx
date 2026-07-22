@@ -24,10 +24,27 @@ export default function EntryScreen({ onEnterRoom, notice }) {
     event.preventDefault()
     setBusy(true)
     setError(null)
+    const roomCode = code.trim().toUpperCase()
+    const playerName = name.trim()
     try {
-      const result = await api.joinRoom(code.trim().toUpperCase(), name.trim())
+      const result = await api.joinRoom(roomCode, playerName)
       onEnterRoom(result)
     } catch (err) {
+      // A 409 here means the game already started (RoomAlreadyStartedError).
+      // Treat "Join" with a name that's already in that room as a reclaim —
+      // no separate rejoin button — and only surface an error if that fails
+      // too (wrong name, room genuinely gone, etc.).
+      if (err.status === 409) {
+        try {
+          const reclaimed = await api.reclaimPlayer(roomCode, playerName)
+          onEnterRoom(reclaimed)
+          return
+        } catch (reclaimErr) {
+          setError(reclaimErr.message)
+          setBusy(false)
+          return
+        }
+      }
       setError(err.message)
       setBusy(false)
     }
